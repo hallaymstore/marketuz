@@ -1,0 +1,414 @@
+/* Marketuz winter atelier. Art stays in separate, transparent WebP layers. */
+:root {
+  --winter-ink:#153d37;
+  --winter-gold:#b58b4d;
+  --winter-pearl:#fffaf0;
+}
+body {
+  background:#f8f6f0 url('/assets/decor/winter-ivory-background.webp') center top/cover fixed no-repeat;
+}
+body::before,body::after { content:none; }
+.announcement {
+  position:relative;
+  z-index:61;
+  background:linear-gradient(90deg,#103e37,#236254 50%,#103e37);
+  color:#fff9e9;
+  border-top:1px solid #c6a46b;
+  border-bottom:1px solid #d9c395;
+  box-shadow:inset 0 1px #ffffff24;
+}
+.announcement-star {color:#f4d48f;animation:winterGlint 4s ease-in-out infinite}
+.announcement-star:last-child {animation-delay:-2s}
+.site-header {
+  position:sticky;
+  overflow:visible;
+  background:linear-gradient(105deg,#fffdf9f5,#fff9eef2 55%,#f5f6f1f2);
+  border-bottom:1px solid #d9c59c;
+  box-shadow:0 5px 22px #4d3c271c;
+}
+.site-header::after {content:none}
+.header-main,.mobile-search {position:relative;z-index:2}
+.nav-garland {
+  position:absolute;
+  left:0;
+  right:0;
+  top:calc(100% - 5px);
+  height:55px;
+  z-index:1;
+  pointer-events:none;
+  background:url('/assets/decor/pine-garland.webp') center top/650px 47px repeat-x;
+  filter:drop-shadow(0 4px 5px #31463837);
+}
+.nav-garland img {
+  display:block;
+  position:absolute;
+  left:50%;
+  top:-5px;
+  width:min(920px,72vw);
+  height:70px;
+  transform:translateX(-50%);
+  object-fit:fill;
+}
+.winter-architecture {position:fixed;inset:0;z-index:20;pointer-events:none;overflow:hidden}
+.winter-column {
+  position:absolute;
+  top:106px;
+  bottom:-8px;
+  width:clamp(88px,6.5vw,132px);
+  height:calc(100vh - 98px);
+  object-fit:fill;
+  filter:drop-shadow(0 8px 9px #725f4540);
+}
+.winter-column-left {left:-13px}
+.winter-column-right {right:-13px;transform:scaleX(-1)}
+.winter-lantern {
+  position:absolute;
+  top:96px;
+  width:clamp(88px,7.2vw,138px);
+  height:auto;
+  transform-origin:50% 0;
+  filter:drop-shadow(0 12px 10px #7e5c3070);
+  animation:winterLantern 5.8s ease-in-out infinite alternate;
+}
+.winter-lantern-left {left:clamp(11px,2vw,39px)}
+.winter-lantern-right {right:clamp(11px,2vw,39px);animation-delay:-2.9s}
+@keyframes winterLantern {from{transform:rotate(-2deg)}to{transform:rotate(2deg)}}
+@keyframes winterGlint {0%,100%{opacity:.62}50%{opacity:1;text-shadow:0 0 12px #ffebbb}}
+@media(min-width:1150px) {
+  #app.page-pad {padding-left:clamp(96px,6.2vw,132px);padding-right:clamp(96px,6.2vw,132px)}
+  .footer.page-pad {padding-left:clamp(96px,6.2vw,132px);padding-right:clamp(96px,6.2vw,132px)}
+}
+#app {position:relative;padding-top:36px}
+.hero-grid {gap:18px}
+.hero-main {
+  min-height:570px;
+  overflow:hidden;
+  color:var(--winter-ink);
+  border:1px solid #d6bd8c;
+  border-radius:29px;
+  background:radial-gradient(circle at 18% 15%,#fffefd,#fff8e9 54%,#e6eee8);
+  box-shadow:inset 0 0 0 5px #ffffffb5,0 20px 40px #305b4a29;
+}
+.hero-main::before {
+  z-index:0;
+  background:linear-gradient(90deg,#fffdf9 0%,#fff9efec 45%,#fff9ef00 72%);
+}
+.hero-main::after {content:none}
+.hero-copy {position:relative;z-index:3;width:61%;padding:clamp(33px,4.2vw,76px)}
+.hero-kicker {
+  color:#6e5738;
+  background:#fffdf4cc;
+  border:1px solid #c8aa73;
+  box-shadow:0 4px 14px #947d5030;
+}
+.hero-kicker b {background:#c39248;box-shadow:0 0 0 4px #d4aa6438,0 0 9px #efce94}
+.hero-copy h1 {
+  color:#173e37;
+  font-size:clamp(3rem,4.35vw,5.4rem);
+  line-height:1.04;
+  letter-spacing:-.065em;
+  text-shadow:0 2px 0 #fff;
+}
+.hero-copy h1 em {
+  font-style:italic;
+  font-family:Georgia,serif;
+  font-weight:500;
+  letter-spacing:-.055em;
+  color:#9b7952;
+}
+.hero-copy p {color:#566e64;font-size:clamp(.83rem,.9vw,1rem);line-height:1.75;max-width:480px}
+.hero-copy .btn-lime {
+  color:#173e37;
+  background:radial-gradient(circle at 25% 0%,#fff9de,#f3d398 72%,#dbb779);
+  border:1px solid #bd914e;
+  box-shadow:inset 0 1px #fff9e9,0 4px 0 #ad814b,0 9px 20px #8f713439;
+}
+.hero-copy .btn-outline-light {
+  color:#214a42;
+  background:#fffdf9df;
+  border:1px solid #adbaae;
+  box-shadow:inset 0 1px #fff,0 4px 0 #d4ded5,0 9px 18px #4155441a;
+}
+.hero-copy .btn:hover {filter:brightness(1.04)}
+.hero-image-panel {
+  position:absolute;
+  z-index:1;
+  top:12px;
+  bottom:12px;
+  right:12px;
+  width:49%;
+  overflow:hidden;
+  border-radius:19px;
+  border:2px solid #fff8e9;
+  box-shadow:0 0 0 1px #c7ac70,0 13px 30px #1e483b28;
+}
+.hero-image-panel::after {
+  content:'';
+  position:absolute;
+  inset:0;
+  background:linear-gradient(90deg,#fdf8ec6e,transparent 33%),linear-gradient(0deg,#0a342c98,transparent 34%);
+  pointer-events:none;
+}
+.hero-image-panel img {width:100%;height:100%;object-fit:cover;object-position:70% center}
+.hero-image-panel span {
+  position:absolute;
+  z-index:2;
+  bottom:23px;
+  right:23px;
+  border:1px solid #f6e6bd9c;
+  border-radius:99px;
+  padding:10px 16px;
+  color:#fff9e8;
+  background:#123f37c4;
+  backdrop-filter:blur(8px);
+  font-size:.67rem;
+  letter-spacing:.11em;
+  font-weight:800;
+  text-transform:uppercase;
+}
+.hero-sprig {
+  position:absolute;
+  z-index:4;
+  top:-12px;
+  left:-12px;
+  width:clamp(96px,10vw,162px);
+  pointer-events:none;
+  filter:drop-shadow(0 3px 4px #25473736);
+}
+.story-card {
+  border:5px solid #fffcf5;
+  outline:1px solid #ccb385;
+  box-shadow:0 12px 24px #3851462e;
+  transition:transform .24s,box-shadow .24s;
+}
+.story-card::before {background:linear-gradient(0deg,#0a2f29ec 0%,#13463b92 39%,#123b2a05 84%)}
+.story-card::after {
+  content:'';
+  position:absolute;
+  top:-4px;
+  right:-4px;
+  width:130px;
+  height:120px;
+  z-index:1;
+  background:url('/assets/decor/pine-corner.webp') center/contain no-repeat;
+  transform:scaleX(-1);
+  pointer-events:none;
+}
+.story-card:hover {box-shadow:0 18px 35px #234a3c45}
+.story-card.one {background-image:url('/assets/winter-fashion.webp');background-position:60% center}
+.story-card.two {background-image:url('/assets/winter-home.webp');background-position:70% center}
+.benefits {
+  position:relative;
+  margin:29px 0 70px;
+  border:1px solid #d4c9ad;
+  background:linear-gradient(110deg,#fffdfaeb,#fffaf3d6),url('/assets/decor/winter-ivory-background.webp') center/cover;
+  box-shadow:0 12px 32px #49624b21;
+  border-radius:21px;
+}
+.benefit-icon {color:#1b5c50;background:linear-gradient(135deg,#fff7e9,#e4f0e9);border:1px solid #d7cbab;box-shadow:inset 0 1px #fff}
+.winter-seam {height:0;position:relative;z-index:5;margin:-37px 0 67px;pointer-events:none}
+.winter-seam::before {
+  content:'';
+  position:absolute;
+  top:20px;
+  left:0;
+  right:0;
+  border-top:1px solid #c7ad78;
+  opacity:.4;
+}
+.winter-seam img {position:absolute;left:50%;top:-11px;width:min(720px,68vw);height:90px;object-fit:fill;transform:translateX(-50%);filter:drop-shadow(0 3px 3px #52644a2a)}
+.section-heading .eyebrow,.page-heading .eyebrow {color:#9b783e}
+.section-heading h2,.page-heading h1 {color:#183e38}
+.category-tile {border:4px solid #fffaf1;outline:1px solid #d5bd8c;box-shadow:0 12px 28px #244f3a30}
+.category-tile::after {
+  content:'';
+  position:absolute;
+  z-index:1;
+  top:-5px;
+  left:-5px;
+  width:112px;
+  height:105px;
+  pointer-events:none;
+  background:url('/assets/decor/pine-corner.webp') center/contain no-repeat;
+}
+.category-aksessuar {background-image:url('/assets/winter-fashion.webp');background-position:60% center}
+.category-uy {background-image:url('/assets/winter-home.webp');background-position:70% center}
+.product-card {
+  border:1px solid #dbcdae;
+  border-radius:21px;
+  box-shadow:0 8px 22px #42553e1b;
+  background:#fffdf7;
+}
+.product-image {background:#e8efea}
+.product-info {
+  position:relative;
+  overflow:hidden;
+  padding:15px 15px 16px;
+  background:linear-gradient(130deg,#fffdf8f0,#f8f5ede8),url('/assets/decor/winter-ivory-background.webp') center/cover;
+}
+.product-info::before {
+  content:'';
+  position:absolute;
+  z-index:0;
+  left:-18px;
+  bottom:-43px;
+  width:128px;
+  height:116px;
+  transform:scaleY(-1);
+  opacity:.16;
+  background:url('/assets/decor/pine-corner.webp') center/contain no-repeat;
+  pointer-events:none;
+}
+.product-info>* {position:relative;z-index:1}
+.product-bottom .btn {
+  min-height:40px;
+  padding:8px 12px;
+  white-space:nowrap;
+  color:#fffdf5;
+  border:1px solid #a88d5c;
+  background:linear-gradient(120deg,#1f6659,#145046 75%,#103c36);
+  box-shadow:inset 0 1px #ffffff55,0 3px 0 #0f3c35,0 7px 15px #234d4229;
+}
+.product-bottom .btn:hover {background:linear-gradient(120deg,#287b68,#175a4e)}
+.product-bottom .bag-artwork {width:19px;height:19px;min-width:19px;object-fit:contain}
+.favorite-btn {border:1px solid #dbcda9;background:linear-gradient(#fffefa,#f5f1e6);box-shadow:0 3px 8px #33544128}
+.editorial {
+  overflow:hidden;
+  border:5px solid #fffcf3;
+  outline:1px solid #c3a164;
+  background-image:url('/assets/winter-home.webp');
+  box-shadow:0 18px 35px #264a3c32;
+}
+.editorial::before {background:linear-gradient(90deg,#0c3831e8,#0d3931ac 48%,transparent)}
+.editorial::after {
+  content:'';
+  position:absolute;
+  top:0;
+  right:0;
+  width:160px;
+  height:150px;
+  z-index:2;
+  transform:scaleX(-1);
+  background:url('/assets/decor/pine-corner.webp') center/contain no-repeat;
+  pointer-events:none;
+}
+.footer {
+  position:relative;
+  background:linear-gradient(125deg,#0d302c,#18463b 52%,#0c302b);
+  border-top:2px solid #c5a36b;
+}
+.footer::before {
+  content:'';
+  position:absolute;
+  top:-34px;
+  left:0;
+  right:0;
+  height:59px;
+  pointer-events:none;
+  background:url('/assets/decor/pine-garland.webp') center/700px 59px repeat-x;
+  filter:drop-shadow(0 4px 5px #122e294d);
+}
+.bottom-nav {background:linear-gradient(#fffdf7fa,#f7f5ecf8);border-top:1px solid #cbb689;box-shadow:0 -8px 20px #1c4b392c}
+.bottom-nav a.active {color:#145447;background:#edf3e8;border:1px solid #e2d2a9}
+.drawer-feature {background-image:url('/assets/winter-hero.webp')}
+@media(max-width:1360px) {
+  .hero-main {min-height:515px}
+  .hero-copy {width:62%;padding:35px}
+  .hero-copy h1 {font-size:clamp(2.75rem,4.3vw,4.4rem)}
+  .hero-sprig {width:104px}
+}
+@media(max-width:1149px) {
+  .winter-column {width:58px;left:-17px}
+  .winter-column-right {left:auto;right:-17px}
+  .winter-lantern {width:84px;top:112px}
+  .winter-lantern-left {left:-7px}
+  .winter-lantern-right {right:-7px}
+  #app.page-pad {padding-left:clamp(35px,5vw,70px);padding-right:clamp(35px,5vw,70px)}
+  .hero-grid {grid-template-columns:minmax(0,1.45fr) minmax(240px,.75fr)}
+  .hero-copy h1 {font-size:clamp(2.7rem,4.6vw,4rem)}
+  .hero-copy p {font-size:.8rem}
+}
+@media(max-width:780px) {
+  .winter-architecture {display:none}
+  .announcement {font-size:.62rem;min-height:29px}
+  .announcement-star,.announcement-sep {display:none}
+  .site-header {box-shadow:0 4px 17px #68553820}
+  .nav-garland {height:42px;background-size:530px 39px}
+  .nav-garland img {height:49px;width:min(480px,75vw)}
+  #app.page-pad {padding:34px 18px 55px}
+  .hero-grid {grid-template-columns:1fr;gap:16px}
+  .hero-main {min-height:550px}
+  .hero-copy {width:60%}
+  .hero-copy h1 {font-size:clamp(2.8rem,7vw,4rem)}
+  .hero-image-panel {width:49%}
+  .winter-seam img {height:60px}
+  .bottom-nav::before {
+    content:'';
+    position:absolute;
+    top:-18px;
+    left:0;
+    right:0;
+    height:26px;
+    background:url('/assets/decor/pine-garland.webp') center/330px 26px repeat-x;
+    pointer-events:none;
+    filter:drop-shadow(0 -2px 3px #2c4f3928);
+  }
+  .bottom-nav::after {
+    content:'✦';
+    position:absolute;
+    top:-12px;
+    left:50%;
+    transform:translateX(-50%);
+    width:21px;
+    height:21px;
+    display:grid;
+    place-items:center;
+    border-radius:50%;
+    background:#fff6dd;
+    border:1px solid #b68f52;
+    color:#9d7947;
+    font-size:10px;
+    pointer-events:none;
+  }
+}
+@media(max-width:520px) {
+  #app.page-pad {padding:30px 13px 55px}
+  .nav-garland {height:30px;background-size:410px 32px}
+  .nav-garland img {width:64vw;height:38px}
+  .hero-main {display:flex;flex-direction:column-reverse;min-height:0;border-radius:23px}
+  .hero-main::before {background:linear-gradient(#fffaf0,#fffdf9)}
+  .hero-image-panel {
+    position:relative;
+    z-index:1;
+    top:auto;
+    right:auto;
+    bottom:auto;
+    width:calc(100% - 12px);
+    height:230px;
+    margin:6px 6px 0;
+    border-radius:17px;
+  }
+  .hero-image-panel img {object-position:69% center}
+  .hero-image-panel span {right:11px;bottom:11px;padding:6px 9px;font-size:.53rem}
+  .hero-copy {width:100%;padding:19px 22px 27px}
+  .hero-copy h1 {font-size:clamp(2.7rem,11.4vw,4.1rem);margin:13px 0 9px}
+  .hero-copy p {font-size:.78rem;line-height:1.55;margin:0}
+  .hero-kicker {font-size:.58rem;padding:7px 10px}
+  .hero-buttons {margin-top:18px;gap:8px}
+  .hero-buttons .btn {min-height:40px;padding:9px 12px;font-size:.7rem}
+  .hero-sprig {width:88px;top:-14px;left:-15px}
+  .story-card {border-width:3px}
+  .story-card::after {width:84px;height:78px}
+  .benefits {margin:18px 0 51px}
+  .winter-seam {margin:-28px 0 49px}
+  .winter-seam img {width:80vw;height:54px}
+  .category-tile::after {width:78px;height:70px}
+  .product-bottom .btn {min-height:35px;padding:6px 8px;font-size:.65rem;gap:6px}
+  .product-bottom .bag-artwork {width:16px;height:16px;min-width:16px}
+  .product-info {padding:11px 10px 12px}
+  .product-info::before {width:90px;height:85px;bottom:-30px}
+  .footer::before {top:-25px;height:42px;background-size:430px 42px}
+}
+@media(prefers-reduced-motion:reduce) {
+  .winter-lantern,.announcement-star {animation:none!important}
+}
