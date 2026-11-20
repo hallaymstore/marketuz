@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { categories, products as samples, regions } from './seed.js';
+import { categories, products as samples, featuredSamples, regions } from './seed.js';
 
 const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -195,6 +195,8 @@ async function initialize() {
   if (!count.rows[0].n) {
     for (const p of samples) await pool.query("INSERT INTO products(name,description,category,price,old_price,stock,image_url,badge,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active')",p);
     console.log('Sample product catalog initialized.');
+  } else {
+    for (const p of featuredSamples) await pool.query("INSERT INTO products(name,description,category,price,old_price,stock,image_url,badge,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,'active' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name=$1 AND seller_id IS NULL)",p);
   }
   const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase(), adminPassword = process.env.ADMIN_PASSWORD;
   if(adminEmail && adminPassword) {

@@ -1,13 +1,20 @@
 export const categories = [
+  { id: 'aksessuar', name: 'Aksessuarlar', subtitle: 'Uslubingizga mos detallar', image: '/assets/fashion-story.webp' },
+  { id: 'moda', name: 'Kiyim-kechak', subtitle: 'Yangi mavsum, yangi uslub', image: 'https://images.unsplash.com/photo-1483985988355-763728e1935b?w=1200&q=82' },
   { id: 'elektronika', name: 'Elektronika', subtitle: 'Har kun uchun aqlli tanlov', image: 'https://images.unsplash.com/photo-1498049794561-7780e7231661?w=1200&q=82' },
-  { id: 'moda', name: 'Moda va uslub', subtitle: 'O‘zingizga mos kayfiyat', image: 'https://images.unsplash.com/photo-1483985988355-763728e1935b?w=1200&q=82' },
-  { id: 'uy', name: 'Uy va interyer', subtitle: 'Uyingizga yangi nafas', image: 'https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?w=1200&q=82' },
+  { id: 'uy', name: 'Uy buyumlari', subtitle: 'Uyingizga yangi nafas', image: '/assets/home-story.webp' },
   { id: 'gozallik', name: 'Go‘zallik', subtitle: 'O‘zingizga vaqt ajrating', image: 'https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=1200&q=82' },
-  { id: 'sport', name: 'Sport va sayohat', subtitle: 'Harakatdan ilhom oling', image: 'https://images.unsplash.com/photo-1517836357463-d25dfeac3438?w=1200&q=82' },
-  { id: 'bolalar', name: 'Bolalar olami', subtitle: 'Kichkintoylar uchun', image: 'https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=1200&q=82' }
+  { id: 'bolalar', name: 'Bolalar olami', subtitle: 'Kichkintoylar uchun', image: 'https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=1200&q=82' },
+  { id: 'sport', name: 'Sport va sayohat', subtitle: 'Harakatdan ilhom oling', image: 'https://images.unsplash.com/photo-1517836357463-d25dfeac3438?w=1200&q=82' }
 ];
 
 export const products = [
+  ['Urban mini sumka', 'Yengil, ixcham va kundalik obrazga mos aksessuar.', 'aksessuar', 249000, 315000, 36, 'https://images.unsplash.com/photo-1548036328-c9fa89d128fa?w=1100&q=85', 'Yangi'],
+  ['Nafis ziraklar to‘plami', 'Har kungi va bayramona uslub uchun nozik bezaklar.', 'aksessuar', 119000, 159000, 64, 'https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?w=1100&q=85', 'Tanlov'],
+  ['Yumshoq trikotaj kardigan', 'Qulay va nafis qatlamli uslub uchun iliq trikotaj.', 'moda', 289000, 359000, 28, 'https://images.unsplash.com/photo-1434389677669-e08b4cac3105?w=1100&q=85', 'Yangi'],
+  ['Oq paxta futbolka', 'Soddalikni yaxshi ko‘radiganlar uchun kundalik asos.', 'moda', 99000, 129000, 88, 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=1100&q=85', 'Ommabop'],
+  ['Sayohat uchun ryukzak', 'Shahar va safar uchun ko‘p bo‘limli qulay sumka.', 'aksessuar', 329000, 399000, 25, 'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=1100&q=85', 'Top'],
+  ['Retro quyosh ko‘zoynagi', 'Yengil ramka va yorqin kunlar uchun zamonaviy detal.', 'aksessuar', 139000, 179000, 52, 'https://images.unsplash.com/photo-1572635196237-14b3f281503f?w=1100&q=85', 'Yangi'],
   ['Wireless Studio quloqchin', 'Tiniq ovoz, faol shovqin pasaytirish va kun bo‘yi qulaylik.', 'elektronika', 389000, 490000, 29, 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=1100&q=85', 'Yangi'],
   ['Minimalist qo‘l soati', 'Zamonaviy ko‘rinish va har kungi uchrashuvlar uchun nafis detal.', 'moda', 279000, 349000, 38, 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=1100&q=85', 'Ommabop'],
   ['Linen Lounge kreslo', 'Yumshoq mato, qulay suyanchiq va xonadonga iliq kayfiyat.', 'uy', 1259000, 1499000, 8, 'https://images.unsplash.com/photo-1598300053653-4b754a5c5824?w=1100&q=85', 'Chegirma'],
@@ -25,5 +32,8 @@ export const products = [
   ['Yumshoq bolalar pled', 'Kichkintoy uchun yoqimli, muloyim matoli pled.', 'bolalar', 149000, 189000, 50, 'https://images.unsplash.com/photo-1555252333-9f8e92e65df9?w=1100&q=85', 'Tanlov'],
   ['Botanika xona guli', 'Yashil burchak yaratish uchun tabiiy ko‘rinish.', 'uy', 129000, 159000, 32, 'https://images.unsplash.com/photo-1485955900006-10f4d324d411?w=1100&q=85', 'Yangi']
 ];
+
+// Existing demo databases receive these new arrivals once, without replacing orders or seller listings.
+export const featuredSamples = products.slice(0, 6);
 
 export const regions = ['Toshkent shahri','Toshkent viloyati','Qashqadaryo','Samarqand','Buxoro','Andijon','Farg‘ona','Namangan','Surxondaryo','Jizzax','Sirdaryo','Navoiy','Xorazm','Qoraqalpog‘iston'];
