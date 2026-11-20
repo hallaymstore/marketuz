@@ -26,7 +26,15 @@ const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, s => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[s]);
 const money = n => `${new Intl.NumberFormat('uz-UZ').format(Number(n) || 0)} so‘m`;
 const safeImage = value => { try { const u = new URL(value); return u.protocol === 'https:' ? esc(u.href) : ''; } catch { return ''; } };
-const img = (value, alt, extra = '') => `<img src="${safeImage(value)}" alt="${esc(alt)}" loading="lazy" ${extra}>`;
+const img = (value, alt, extra = '') => {
+  const source=safeImage(value); let responsive='';
+  if (source.startsWith('https://images.unsplash.com/')) {
+    const u=new URL(value), variant=(width,quality)=>{ const copy=new URL(u); copy.searchParams.set('w',width); copy.searchParams.set('q',quality); return esc(copy.href); };
+    const sizes=extra.includes('detail-image')?'(max-width: 780px) 100vw, 50vw':'(max-width: 520px) 50vw, (max-width: 1100px) 33vw, 25vw';
+    responsive=`srcset="${variant(380,76)} 380w, ${variant(760,80)} 760w, ${variant(1100,84)} 1100w" sizes="${sizes}"`;
+  }
+  return `<img src="${source}" ${responsive} alt="${esc(alt)}" loading="lazy" ${extra}>`;
+};
 const labelStatus = { new:'Yangi so‘rov', accepted:'Qabul qilindi', packing:'Tayyorlanmoqda', handed_over:'Topshirildi', in_transit:'Yo‘lda', delivered:'Yetkazildi', cancelled:'Bekor qilingan', pending:'Tekshiruvda', active:'Faol', rejected:'Rad etilgan', archived:'Arxiv', approved:'Tasdiqlangan', ready:'Tayyor' };
 const dateText = s => new Date(s).toLocaleDateString('uz-UZ', { day:'2-digit', month:'long', year:'numeric' });
 function readLocal(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
@@ -119,6 +127,8 @@ const sellerIntro = `<div class="delivery-hero seller-hero"><span class="eyebrow
 async function renderSeller() {
   updateTitle('Sotuvchi markazi');
   if(!state.user) return `${sellerIntro}${empty('Sotuvchi bo‘lishga tayyormisiz?','Ariza topshirish uchun avval hisobga kiring.','Hisobga kirish','/account','store')}`;
+  state.user=(await api('/me')).user;
+  if(state.user.role==='admin') return `${sellerIntro}${empty('Administrator hisobidasiz','Sotuvchi arizalarini administrator panelida boshqaring.','Admin panelga o‘tish','/admin','sliders')}`;
   if(state.user.role !== 'seller') return `${sellerIntro}<div class="form-card" style="margin-bottom:30px"><h2>${state.user.seller_status==='pending'?'So‘rovingiz ko‘rib chiqilmoqda':'Sotuvchi bo‘lish uchun ariza'}</h2><p class="summary-note">${state.user.seller_status==='pending'?'Administrator arizangizni tekshiradi. Tasdiqlangach bu bo‘limda boshqaruv paneli ochiladi.':'Sotuvchi arizasi administratorga yuboriladi. Mahsulotlar katalogga chiqishidan oldin tekshiriladi.'}</p>${state.user.seller_status==='pending'?'':`<button class="btn btn-primary" data-action="seller-request">Ariza yuborish</button>`}</div>`;
   const tab=new URLSearchParams(location.search).get('tab')||'products';
   const [p,o]=await Promise.all([api('/seller/products'),api('/seller/orders')]); state.sellerProducts=p.products; state.sellerOrders=o.items;
