@@ -181,7 +181,7 @@ app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async
 app.get('/api/admin/orders', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query('SELECT o.*,u.email AS buyer_email FROM orders o JOIN users u ON u.id=o.buyer_id ORDER BY o.created_at DESC LIMIT 100'); res.json({orders:rows}); }));
 app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,24), tracking=text(req.body.trackingNumber,100); if(!['accepted','packing','handed_over','in_transit','delivered','cancelled'].includes(status)) throw fail(400,'Status xato.'); if(status==='cancelled') { await cancelOrder(req.params.id,null); return res.json({ok:true}); } const {rows}=await pool.query("UPDATE orders SET status=$1,tracking_number=$2,updated_at=now() WHERE id=$3 AND status!='cancelled' RETURNING *",[status,tracking||null,req.params.id]); if(!rows[0]) throw fail(404,'Buyurtma topilmadi.'); res.json({order:rows[0]}); }));
 
-app.use(express.static(path.join(root,'public'),{ maxAge: '1h', index: 'index.html' }));
+app.use(express.static(path.join(root,'public'),{ maxAge: '1h', index: 'index.html', setHeaders(res,filePath) { if (filePath.endsWith('.html')) res.setHeader('Cache-Control','no-cache'); } }));
 app.get('*', (req,res) => { if(req.path.startsWith('/api/')) return res.status(404).json({error:'API manzili topilmadi.'}); res.sendFile(path.join(root,'public','index.html')); });
 app.use((err,req,res,next) => { if(res.headersSent) return next(err); if(!err.status || err.status >= 500) console.error('Request error:', err.message); res.status(err.status || 500).json({ error: err.status ? err.message : 'Serverda xatolik yuz berdi. Keyinroq urinib ko‘ring.' }); });
 
