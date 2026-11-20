@@ -198,6 +198,7 @@ async function initialize() {
   } else {
     for (const p of featuredSamples) await pool.query("INSERT INTO products(name,description,category,price,old_price,stock,image_url,badge,status) SELECT $1::varchar(180),$2,$3,$4,$5,$6,$7,$8,'active' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name=$1::varchar(180) AND seller_id IS NULL)",p);
   }
+  await pool.query("UPDATE products SET image_url=$1,updated_at=now() WHERE seller_id IS NULL AND name=$2 AND image_url<>$1", ['/assets/product-mini-bag.webp','Urban mini sumka']);
   const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase(), adminPassword = process.env.ADMIN_PASSWORD;
   if(adminEmail && adminPassword) {
     if(!emailOk(adminEmail) || adminPassword.length < 16) throw new Error('ADMIN_EMAIL/ADMIN_PASSWORD configuration is invalid.');

@@ -9,7 +9,7 @@ export const categories = [
 ];
 
 export const products = [
-  ['Urban mini sumka', 'Yengil, ixcham va kundalik obrazga mos aksessuar.', 'aksessuar', 249000, 315000, 36, 'https://images.unsplash.com/photo-1548036328-c9fa89d128fa?w=1100&q=85', 'Yangi'],
+  ['Urban mini sumka', 'Yengil, ixcham va kundalik obrazga mos aksessuar.', 'aksessuar', 249000, 315000, 36, '/assets/product-mini-bag.webp', 'Yangi'],
   ['Nafis ziraklar to‘plami', 'Har kungi va bayramona uslub uchun nozik bezaklar.', 'aksessuar', 119000, 159000, 64, 'https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?w=1100&q=85', 'Tanlov'],
   ['Yumshoq trikotaj kardigan', 'Qulay va nafis qatlamli uslub uchun iliq trikotaj.', 'moda', 289000, 359000, 28, 'https://images.unsplash.com/photo-1434389677669-e08b4cac3105?w=1100&q=85', 'Yangi'],
   ['Oq paxta futbolka', 'Soddalikni yaxshi ko‘radiganlar uchun kundalik asos.', 'moda', 99000, 129000, 88, 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=1100&q=85', 'Ommabop'],
