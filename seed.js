@@ -1,8 +1,8 @@
 export const categories = [
-  { id: 'aksessuar', name: 'Aksessuarlar', subtitle: 'Uslubingizga mos detallar', image: '/assets/fashion-story.webp' },
+  { id: 'aksessuar', name: 'Aksessuarlar', subtitle: 'Uslubingizga mos detallar', image: '/assets/winter-fashion.webp' },
   { id: 'moda', name: 'Kiyim-kechak', subtitle: 'Yangi mavsum, yangi uslub', image: 'https://images.unsplash.com/photo-1483985988355-763728e1935b?w=1200&q=82' },
   { id: 'elektronika', name: 'Elektronika', subtitle: 'Har kun uchun aqlli tanlov', image: 'https://images.unsplash.com/photo-1498049794561-7780e7231661?w=1200&q=82' },
-  { id: 'uy', name: 'Uy buyumlari', subtitle: 'Uyingizga yangi nafas', image: '/assets/home-story.webp' },
+  { id: 'uy', name: 'Uy buyumlari', subtitle: 'Uyingizga yangi nafas', image: '/assets/winter-home.webp' },
   { id: 'gozallik', name: 'Go‘zallik', subtitle: 'O‘zingizga vaqt ajrating', image: 'https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=1200&q=82' },
   { id: 'bolalar', name: 'Bolalar olami', subtitle: 'Kichkintoylar uchun', image: 'https://images.unsplash.com/photo-1515488042361-ee00e0ddd4e4?w=1200&q=82' },
   { id: 'sport', name: 'Sport va sayohat', subtitle: 'Harakatdan ilhom oling', image: 'https://images.unsplash.com/photo-1517836357463-d25dfeac3438?w=1200&q=82' }
