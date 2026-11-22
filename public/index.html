@@ -11,11 +11,12 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=20261120ornate2">
   <link rel="stylesheet" href="/winter.css?v=20261120ornate3">
-  <link rel="stylesheet" href="/seasonal.css?v=20261122c">
+  <link rel="stylesheet" href="/seasonal.css?v=20261122d">
   <title>Marketuz — har kuni ajoyib topilmalar</title>
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-  <script src="/cms-ui.js?v=20261122c" defer></script>
-  <script src="/app.js?v=20261122c" defer></script>
+  <script src="/cms-ui.js?v=20261122d" defer></script>
+  <script src="/experience.js?v=20261122d" defer></script>
+  <script src="/app.js?v=20261122d" defer></script>
 </head>
 <body>
   <div class="winter-architecture" aria-hidden="true">
@@ -24,7 +25,7 @@
     <img class="winter-lantern winter-lantern-left" src="/assets/decor/gold-lantern.webp" alt="" decoding="async">
     <img class="winter-lantern winter-lantern-right" src="/assets/decor/gold-lantern.webp" alt="" decoding="async">
   </div>
-  <div class="announcement"><span class="announcement-star">✳</span> <span id="announcement-text">Har kuni yangi topilmalar</span> <span class="announcement-star">✳</span></div>
+  <div class="announcement" id="announcement"><div id="announcement-default"><span class="announcement-star">✳</span> <span id="announcement-text">Har kuni yangi topilmalar</span> <span class="announcement-star">✳</span></div><div id="promo-banner" class="promo-banner" hidden><picture><source id="promo-mobile-image" media="(max-width: 780px)"><img id="promo-image" src="/assets/winter-hero.webp" alt="" loading="lazy"></picture><a id="promo-link" href="/catalog" data-link><small id="promo-eyebrow"></small><strong id="promo-title"></strong><span id="promo-button"></span></a><button id="promo-dismiss" type="button" aria-label="Aksiyani yopish">×</button></div></div>
   <header class="site-header" id="site-header">
     <div class="nav-garland" aria-hidden="true"><img src="/assets/decor/pine-garland.webp" alt="" decoding="async"></div>
     <div class="header-main page-pad">
@@ -44,5 +45,8 @@
   <nav class="bottom-nav" aria-label="Mobil menyu"><a href="/" data-link data-nav="/" aria-label="Bosh sahifa"><span class="icon-slot" data-icon="home"></span><span>Bosh sahifa</span></a><a href="/catalog" data-link data-nav="/catalog" aria-label="Katalog"><span class="icon-slot" data-icon="grid"></span><span>Katalog</span></a><a href="/favorites" data-link data-nav="/favorites" aria-label="Sevimlilar"><span class="icon-slot" data-icon="heart"></span><span>Sevimlilar</span></a><a href="/cart" data-link data-nav="/cart" aria-label="Savat"><span class="bottom-cart-icon"><span class="icon-slot" data-icon="bag"></span><i id="bottom-cart-count"></i></span><span>Savat</span></a><a href="/account" data-link data-nav="/account" aria-label="Profil"><span class="icon-slot" data-icon="user"></span><span>Profil</span></a></nav>
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div><aside id="mobile-drawer" class="drawer" aria-label="Qo‘shimcha menyu" aria-hidden="true"><div class="drawer-heading"><span>Menyu</span><button class="icon-button" data-action="menu-close" aria-label="Menyuni yopish"><span class="icon-slot" data-icon="close"></span></button></div><div class="drawer-feature"><span>Yangi topilmalar har kuni</span><strong>O‘zingizga yoqqanini toping.</strong></div><nav><a href="/" data-link><span class="icon-slot" data-icon="home"></span>Bosh sahifa</a><a href="/catalog" data-link><span class="icon-slot" data-icon="grid"></span>Katalog</a><a href="/seller" data-link><span class="icon-slot" data-icon="store"></span>Sotuvchi markazi</a><a href="/delivery" data-link><span class="icon-slot" data-icon="truck"></span>Yetkazib berish</a><a href="/admin" data-link><span class="icon-slot" data-icon="sliders"></span>Administrator</a><a href="/terms" data-link><span class="icon-slot" data-icon="file"></span>Foydalanish shartlari</a><a href="/privacy" data-link><span class="icon-slot" data-icon="shield"></span>Maxfiylik siyosati</a></nav></aside>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <button id="market-helper" class="market-helper" type="button" aria-label="Marketuz yordamchisi" aria-controls="market-chat" aria-expanded="false" hidden><img id="market-helper-icon" src="/assets/bag-premium.webp" alt="" draggable="false"><span>Yordam</span></button>
+  <section id="market-chat" class="market-chat" aria-label="Marketuz yordamchisi" hidden><div class="market-chat-head"><div><small>✦ MARKETUZ</small><strong id="market-chat-title">Yordamchi</strong></div><button id="market-chat-close" type="button" aria-label="Yordamchini yopish">×</button></div><p id="market-chat-greeting"></p><div id="market-chat-tabs" class="market-chat-tabs"></div><div id="market-chat-log" class="market-chat-log" role="log" aria-live="polite"></div><div id="market-chat-quick" class="market-chat-quick"></div><form id="market-chat-form"><input id="market-chat-input" type="search" maxlength="90" autocomplete="off" placeholder="Mahsulot yoki savolingiz..." aria-label="Savol yozing"><button type="submit" aria-label="Yuborish">➜</button></form><div class="market-chat-foot"><a id="market-chat-contact" href="/delivery" hidden>Operator bilan bog‘lanish</a><button id="market-chat-guide" type="button">Saytdan foydalanish</button></div></section>
+  <div id="market-intro" class="market-intro" hidden><section class="market-intro-card" role="dialog" aria-modal="true" aria-labelledby="market-intro-title"><div class="market-intro-art" aria-hidden="true"><span>✳</span></div><div class="market-intro-body"><button id="market-intro-close" class="market-intro-close" type="button" aria-label="Yo‘lko‘rsatkichni yopish">×</button><small>MARKETUZ · QULAY XARID</small><h2 id="market-intro-title"></h2><p id="market-intro-subtitle"></p><div class="market-intro-panel"><span id="market-intro-step"></span><h3 id="market-intro-heading"></h3><p id="market-intro-text"></p><a id="market-intro-link" href="/catalog" data-link></a></div><div id="market-intro-dots" class="market-intro-dots"></div><div class="market-intro-actions"><button id="market-intro-skip" type="button">O‘tkazib yuborish</button><button id="market-intro-next" type="button">Keyingi →</button></div></div></section></div>
 </body>
 </html>

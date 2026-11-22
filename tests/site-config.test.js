@@ -20,6 +20,13 @@ test('settings whitelist media and reject unsafe URL',()=>{
   assert.throws(()=>validateSite({...defaults,brand:{...defaults.brand,logo:'data:image/svg+xml,<svg/>'}}));
   assert.throws(()=>validateSite({...defaults,content:{...defaults.content,authImage:'javascript:alert(1)'}}));
 });
+test('promotion and help links reject unsafe destinations',()=>{
+  const safe=validateSite({...defaults,promo:{...defaults.promo,enabled:true,mobileImage:'/media/12345678-1234-1234-1234-123456789abc'},assistant:{...defaults.assistant,enabled:true}});
+  assert.equal(safe.promo.enabled,true);
+  assert.equal(safe.promo.mobileImage,'/media/12345678-1234-1234-1234-123456789abc');
+  assert.throws(()=>validateSite({...defaults,promo:{...defaults.promo,href:'javascript:alert(1)'}}));
+  assert.throws(()=>validateSite({...defaults,onboarding:{...defaults.onboarding,steps:[{title:'X',text:'Y',href:'//unsafe.example'}]}}));
+});
 test('Click complete signature includes the merchant prepare ID',()=>{
   const body={click_trans_id:'123',service_id:'456',merchant_trans_id:'order',merchant_prepare_id:'789',amount:'1000.00',action:'1',sign_time:'2026-11-22 12:00:00'};
   assert.notEqual(clickSignature(body,'secret',false),clickSignature(body,'secret',true));

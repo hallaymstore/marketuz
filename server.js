@@ -23,7 +23,7 @@ const pool = demoOnly ? null : new pg.Pool({
   ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : false
 });
 pool?.on('error', error => console.error('Database pool error:', error.message));
-const inMemoryCatalog = samples.map((p, i) => ({ id: i + 1, seller_id: null, name: p[0], description: p[1], category: p[2], price: p[3], old_price: p[4], stock: p[5], image_url: p[6], badge: p[7], status: 'active' }));
+const inMemoryCatalog = samples.map((p, i) => ({ id: i + 1, seller_id: null, name: p[0], description: p[1], category: p[2], price: p[3], old_price: p[4], stock: p[5], image_url: p[6], card_background:'',detail_background:'',badge: p[7], status: 'active' }));
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -124,13 +124,13 @@ app.get('/api/catalog', route(async (req, res) => {
   const condition = where.join(' AND ');
   const count = await pool.query(`SELECT count(*)::int AS total FROM products WHERE ${condition}`, params);
   params.push(limit, (page-1)*limit);
-  const data = await pool.query(`SELECT id, seller_id, name, description, category, price, old_price, stock, image_url, badge, external_links, created_at FROM products WHERE ${condition} ORDER BY ${order} LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+  const data = await pool.query(`SELECT id, seller_id, name, description, category, price, old_price, stock, image_url, card_background, detail_background, badge, external_links, created_at FROM products WHERE ${condition} ORDER BY ${order} LIMIT $${params.length-1} OFFSET $${params.length}`, params);
   const total = count.rows[0].total; res.json({ products: data.rows, total, page, pages: Math.ceil(total/limit) });
 }));
 app.get('/api/products/:id', route(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) throw fail(404, 'Mahsulot topilmadi.');
   if (demoOnly) { const product = inMemoryCatalog.find(p => p.id === Number(req.params.id)); if (!product) throw fail(404, 'Mahsulot topilmadi.'); return res.json({ product }); }
-  const { rows } = await pool.query("SELECT p.id,p.name,p.description,p.category,p.price,p.old_price,p.stock,p.image_url,p.badge,p.external_links,p.created_at,u.full_name AS seller_name FROM products p LEFT JOIN users u ON p.seller_id=u.id WHERE p.id=$1 AND p.status='active'", [req.params.id]);
+  const { rows } = await pool.query("SELECT p.id,p.name,p.description,p.category,p.price,p.old_price,p.stock,p.image_url,p.card_background,p.detail_background,p.badge,p.external_links,p.created_at,u.full_name AS seller_name FROM products p LEFT JOIN users u ON p.seller_id=u.id WHERE p.id=$1 AND p.status='active'", [req.params.id]);
   if (!rows[0]) throw fail(404, 'Mahsulot topilmadi.'); res.json({ product: rows[0] });
 }));
 
@@ -246,12 +246,12 @@ app.post('/api/seller/request', requireDb, auth, route(async (req,res) => {
 }));
 app.get('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const { rows } = await pool.query('SELECT * FROM products WHERE seller_id=$1 ORDER BY created_at DESC LIMIT 100',[req.user.id]); res.json({ products: rows }); }));
 function productInput(body) {
-  const p = { name:text(body.name,180), description:text(body.description,2000), category:text(body.category,40), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock), image:text(body.image,1000), externalLinks:externalLinks(body.externalLinks||[]) };
-  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !imageOk(p.image) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmini tekshiring.');
+  const p = { name:text(body.name,180), description:text(body.description,2000), category:text(body.category,40), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock), image:text(body.image,1000), cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]) };
+  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !imageOk(p.image) || (p.cardBackground&&!imageOk(p.cardBackground)) || (p.detailBackground&&!imageOk(p.detailBackground)) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmlarini tekshiring.');
   return p;
 }
-app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const p = productInput(req.body); const { rows } = await pool.query("INSERT INTO products(seller_id,name,description,category,price,old_price,stock,image_url,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending') RETURNING *",[req.user.id,p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,JSON.stringify(p.externalLinks)]); res.status(201).json({ product:rows[0] }); }));
-app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const p=productInput(req.body); const { rows }=await pool.query("UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,image_url=$7,external_links=$8,status='pending',updated_at=now() WHERE id=$9 AND seller_id=$10 AND status!='archived' RETURNING *",[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,JSON.stringify(p.externalLinks),req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
+app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const p = productInput(req.body); const { rows } = await pool.query("INSERT INTO products(seller_id,name,description,category,price,old_price,stock,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending') RETURNING *",[req.user.id,p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks)]); res.status(201).json({ product:rows[0] }); }));
+app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const p=productInput(req.body); const { rows }=await pool.query("UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,image_url=$7,card_background=$8,detail_background=$9,external_links=$10,status='pending',updated_at=now() WHERE id=$11 AND seller_id=$12 AND status!='archived' RETURNING *",[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
 app.delete('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const result=await pool.query("UPDATE products SET status='archived',updated_at=now() WHERE id=$1 AND seller_id=$2 RETURNING id",[req.params.id,req.user.id]); if(!result.rowCount) throw fail(404,'Mahsulot topilmadi.'); res.json({ok:true}); }));
 app.get('/api/seller/orders', requireDb, auth, role('seller'), route(async (req,res) => { const { rows }=await pool.query('SELECT i.*,o.status AS order_status,o.created_at,o.region,o.district,o.recipient,o.phone FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.seller_id=$1 ORDER BY o.created_at DESC LIMIT 100',[req.user.id]); res.json({items:rows}); }));
 app.patch('/api/seller/order-items/:id', requireDb, auth, role('seller'), route(async (req,res) => { const status=text(req.body.status,20); if(!['packing','ready'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE order_items i SET fulfillment_status=$1 FROM orders o WHERE i.id=$2 AND i.seller_id=$3 AND i.order_id=o.id AND o.status NOT IN ('awaiting_payment','cancelled','delivered') RETURNING i.*",[status,req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Buyurtma topilmadi.'); res.json({item:rows[0]}); }));
@@ -263,14 +263,14 @@ app.get('/api/admin/products', requireDb, auth, role('admin'), route(async (req,
 app.post('/api/admin/products', requireDb, auth, role('admin'), route(async(req,res)=>{
   const p=productInput(req.body),status=text(req.body.status,20);
   if(!['active','pending'].includes(status)) throw fail(400,'Yangi mahsulot holati xato.');
-  const {rows}=await pool.query('INSERT INTO products(name,description,category,price,old_price,stock,image_url,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,JSON.stringify(p.externalLinks),status]);
+  const {rows}=await pool.query('INSERT INTO products(name,description,category,price,old_price,stock,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status]);
   res.status(201).json({product:rows[0]});
 }));
 app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,req.params.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
 app.patch('/api/admin/products/:id/details', requireDb, auth, role('admin'), route(async(req,res)=>{
   const p=productInput(req.body), status=text(req.body.status,20);
   if(!['active','pending','rejected','archived'].includes(status)) throw fail(400,'Mahsulot holati xato.');
-  const {rows}=await pool.query('UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,image_url=$7,external_links=$8,status=$9,updated_at=now() WHERE id=$10 RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,JSON.stringify(p.externalLinks),status,req.params.id]);
+  const {rows}=await pool.query('UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,image_url=$7,card_background=$8,detail_background=$9,external_links=$10,status=$11,updated_at=now() WHERE id=$12 RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status,req.params.id]);
   if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]});
 }));
 app.get('/api/admin/orders', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query('SELECT o.*,u.email AS buyer_email FROM orders o JOIN users u ON u.id=o.buyer_id ORDER BY o.created_at DESC LIMIT 100'); res.json({orders:rows}); }));
