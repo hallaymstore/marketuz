@@ -16,6 +16,13 @@ test('public preview, search and guarded writes', async () => {
     const productPage=await (await fetch(base+'/product/1')).text();assert.match(productPage,/application\/ld\+json/);assert.match(productPage,/og:image/);
     const catalog=await (await fetch(base+'/api/catalog?category=elektronika&q=Wireless')).json();
     assert.equal(catalog.total,1); assert.equal(catalog.products[0].name,'Wireless Studio quloqchin');
+    const first=await (await fetch(base+'/api/catalog/feed?limit=2&sort=price_asc')).json();
+    const second=await (await fetch(base+'/api/catalog/feed?limit=2&sort=price_asc&cursor='+encodeURIComponent(first.nextCursor))).json();
+    assert.equal(first.products.length,2);assert.equal(second.products.length,2);
+    assert.ok(first.products.at(-1).price<=second.products[0].price);
+    assert.ok(!first.products.some(p=>second.products.some(x=>x.id===p.id)));
+    const badCursor=await fetch(base+'/api/catalog/feed?sort=popular&cursor='+encodeURIComponent(first.nextCursor));assert.equal(badCursor.status,400);
+    const recommendations=await (await fetch(base+'/api/recommendations?kind=together&productId=1')).json();assert.ok(recommendations.products.length);assert.ok(recommendations.products.every(x=>x.id!==1));
     const notFound=await fetch(base+'/api/products/999'); assert.equal(notFound.status,404);
     const registration=await fetch(base+'/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}); assert.equal(registration.status,503);
     const blocked=await fetch(base+'/api/auth/logout',{method:'POST',headers:{'Content-Type':'application/json','Origin':'https://bad.example'},body:'{}'}); assert.equal(blocked.status,403);

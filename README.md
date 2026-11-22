@@ -16,6 +16,18 @@ Mavsum tizimi Toshkent sanasi asosida ishlaydi. Qish 20-noyabrdan boshlanadi. Ya
 
 Har bir mahsulotda uchta nomlangan HTTPS tashqi havola tahrirlanadi. Mahsulotning o‘z URL'i, Telegram/WhatsApp va OS ulashish funksiyasi mavjud. SEO sahifa sarlavhasi, canonical, Open Graph, Product JSON-LD, sitemap va PWA manifest serverdan yaratiladi. Xaridor: katalog, qidiruv, savat, sevimlilar, hisob, buyurtma. Sotuvchi: ariza, mahsulotlar va jo‘natishga tayyorlash. Yordamchi sozlanadigan FAQ va katalog bo‘yicha qidiruv bilan ishlaydi; u generativ AI emas. Tranzaksiyalar buyurtma va ombor sonini bloklash bilan bajariladi.
 
+## Katta katalog va tavsiyalar
+
+`/catalog` 24 tadan mahsulotni keyset cursor bilan oladi: foydalanuvchi pastga tushganda `IntersectionObserver` keyingi bo‘lakni olib keladi, qo‘lda «Yana ko‘rish» tugmasi ham bor. Saralash yangilik, narx va `sold_count` asosidagi ommaboplikni qo‘llaydi. Baza indekslari kategoriya, narx, ommaboplik va sotuvchi ro‘yxatini qamraydi. Admin va sotuvchi mahsulot jadvali 50 tadan «Yana mahsulotlar» bilan ochiladi. Katalog soniga dasturiy yuqori chegara qo‘yilmagan; amaliy hajm PostgreSQL, media xotirasi va hosting rejasiga bog‘liq.
+
+Mahsulotning `stock_mode` turi `tracked` bo‘lsa har bir buyurtma ombor sonini kamaytiradi. `replenishable` bo‘lsa mahsulot «Buyurtma asosida» deb ko‘rinadi, ko‘rsatilgan muddat taxminiy va ombor soni cheklanmagan deb ko‘rsatilmaydi. Bunday mahsulot buyurtmada operator tasdig‘ini kutadi; hozir uning uchun faqat yetkazilganda to‘lov variantiga ruxsat beriladi. Har bir buyurtma satri zaxira band qilinganini saqlaydi, shuning uchun keyinchalik mahsulot turini tahrirlash bekor qilish hisobini buzmaydi. Bitta buyurtmada xavfsizlik uchun 20 dona va 30 xil mahsulot chegarasi saqlanadi.
+
+`/discover` ixcham tavsiyalar sahifasi, `/product/:id` «birga xarid qilishadi» bloki, `/account` shaxsiy ijtimoiy ko‘rinishdagi profil va `/shop/:id` ommaviy sotuvchi do‘koni mavjud. Xaridor profili ommaga ochilmaydi; sotuvchi bio/cover/avatar va mahsulotlari ommaga ko‘rinadi. Foydalanuvchi sotuvchini kuzata oladi. Tavsiya ballari qidiruv so‘zlari, ko‘rilgan mahsulot, faol ko‘rish vaqti, savat, sevimlilar, buyurtmalar, kategoriya/narx o‘xshashligi va bir buyurtmada birga kelgan mahsulotlardan tuziladi. Bo‘sh tarixda yangi va ommabop mahsulotlar ko‘rinadi; bitta kategoriya haddan ko‘p chiqmasligi uchun tanlov aralashtiriladi.
+
+Qidiruv/ko‘rish/faol vaqt/savat hodisalari faqat xaridor profilida shaxsiy tavsiyalar **yoqilganda** saqlanadi. Dwell 5 soniyadan boshlab, har hodisa 180 soniyagacha; har hisobda kunlik 300 hodisa. 90 kundan oshgan ma’lumotlar bosqichma bosqich o‘chiriladi. Profil orqali tavsiyalarni o‘chirish barcha faoliyat tarixini o‘chiradi; tarixni alohida tozalash ham bor. Buyurtmalar va sevimlilar bu tugmalar bilan o‘chmaydi.
+
+Rasmlar hozir PostgreSQL `site_assets` jadvalida BYTEA ko‘rinishida. Minglab suratlar uchun productionda object storage/CDN, thumbnail pipeline, zaxira nusxa va kuzatuvni o‘rnatish kerak; PostgreSQL diskini cheksiz deb hisoblamang. `images.unsplash.com` manzillari uchun brauzerga mos `srcset` bor, qurilmadan yuklangan fayllar hozir 1.5 MB bilan cheklangan. Ko‘p minglab yozuvda ILIKE qidiruvni `pg_trgm` yoki alohida qidiruv indeksiga o‘tkazish va katalog/recommendation so‘rovlarini real ma’lumotda `EXPLAIN ANALYZE` bilan o‘lchash tavsiya etiladi.
+
 ## To‘lovni faollashtirish
 
 Click va Payme hosted checkout hamda signed server callback kodlari tayyor. **Hozir kalitlar va provayder sertifikatsiyasi mavjud bo‘lmaguncha ular faol emas.** Buyurtmada «yetkazilganda to‘lov» ishlaydi. Onlayn to‘lovni ochish uchun:

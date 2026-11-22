@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { products as samples, featuredSamples, regions } from './seed.js';
 import { defaults, validateSite, seasonalState, assetUrl } from './site-config.js';
 import { mountPayments } from './payment-handlers.js';
+import { buildInterests, rankProducts } from './recommendations.js';
 
 const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,7 @@ const pool = demoOnly ? null : new pg.Pool({
   ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : false
 });
 pool?.on('error', error => console.error('Database pool error:', error.message));
-const inMemoryCatalog = samples.map((p, i) => ({ id: i + 1, seller_id: null, name: p[0], description: p[1], category: p[2], price: p[3], old_price: p[4], stock: p[5], image_url: p[6], card_background:'',detail_background:'',badge: p[7], status: 'active' }));
+const inMemoryCatalog = samples.map((p, i) => ({ id: i + 1, seller_id: null, name: p[0], description: p[1], category: p[2], price: p[3], old_price: p[4], stock: p[5], stock_mode:'tracked',restock_days:7,sold_count:0,image_url: p[6], card_background:'',detail_background:'',badge: p[7], status: 'active' }));
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -76,7 +77,7 @@ function tokenId(value) {
 }
 function cookieValue(req, name) { const found = (req.headers.cookie || '').split(';').map(x => x.trim()).find(x => x.startsWith(name + '=')); return found?.slice(name.length + 1); }
 const setSession = (res, id) => res.cookie('marketuz_session', tokenFor(id), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: 7 * 864e5 });
-const auth = route(async (req, res, next) => { const id = tokenId(cookieValue(req, 'marketuz_session') || ''); if (!id) throw fail(401, 'Davom etish uchun hisobingizga kiring.'); const { rows } = await pool.query('SELECT id, full_name, email, phone, role, seller_status FROM users WHERE id=$1', [id]); if (!rows[0]) throw fail(401, 'Hisob topilmadi.'); req.user = rows[0]; next(); });
+const auth = route(async (req, res, next) => { const id = tokenId(cookieValue(req, 'marketuz_session') || ''); if (!id) throw fail(401, 'Davom etish uchun hisobingizga kiring.'); const { rows } = await pool.query('SELECT id, full_name, email, phone, role, seller_status, avatar_url, cover_url, bio, personalization_enabled FROM users WHERE id=$1', [id]); if (!rows[0]) throw fail(401, 'Hisob topilmadi.'); req.user = rows[0]; next(); });
 const role = name => (req, res, next) => req.user?.role === name ? next() : next(fail(403, 'Ushbu bo‘lim uchun ruxsat yo‘q.'));
 const authHits = new Map();
 const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Date.now(); const hit = authHits.get(key) || { n: 0, until: now + 15 * 60_000 }; if (hit.until < now) { hit.n = 0; hit.until = now + 15 * 60_000; } if (++hit.n > 25) return res.status(429).json({ error: 'Juda ko‘p urinish. Birozdan keyin qayta urinib ko‘ring.' }); authHits.set(key, hit); next(); };
@@ -101,22 +102,55 @@ app.patch('/api/admin/settings', requireDb, auth, role('admin'), route(async(req
   try { await db.query('BEGIN'); await db.query("INSERT INTO site_settings(key,value,updated_by) VALUES('site',$1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now(),updated_by=excluded.updated_by",[next,req.user.id]); await db.query('INSERT INTO settings_audit(actor_id,old_value,new_value) VALUES($1,$2,$3)',[req.user.id,site,next]); await db.query('COMMIT'); site=next; res.json({site,seasonal:seasonalState(site)}); }
   catch(e){await db.query('ROLLBACK');throw e;} finally{db.release();}
 }));
-app.post('/api/assets', requireDb, auth, (req,res,next)=>['admin','seller'].includes(req.user.role)?next():next(fail(403,'Rasm yuklash uchun sotuvchi yoki administrator bo‘ling.')), route(async(req,res)=>{
+app.post('/api/assets', requireDb, auth, route(async(req,res)=>{
   const data=String(req.body.data||'');
   if(!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(data)) throw fail(400,'PNG, JPEG yoki WebP rasm yuklang.');
   const [,kind,b64]=data.match(/^data:image\/(png|jpeg|webp);base64,(.*)$/);
   const bytes=Buffer.from(b64,'base64');
   if(bytes.length<32 || bytes.length>1_500_000) throw fail(413,'Rasm 1.5 MB dan kichik bo‘lsin.');
+  if(req.user.role==='buyer') { const {rows}=await pool.query("SELECT count(*)::int AS n FROM site_assets WHERE owner_id=$1 AND created_at>now()-interval '1 day'",[req.user.id]); if(rows[0].n>=8) throw fail(429,'Bugun uchun rasm yuklash limiti tugadi.'); }
   const valid=kind==='png'?bytes.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')):kind==='jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP';
   if(!valid) throw fail(400,'Rasm fayli buzilgan yoki noto‘g‘ri.');
   const id=randomUUID(), mime=kind==='jpeg'?'image/jpeg':`image/${kind}`;
   await pool.query('INSERT INTO site_assets(id,owner_id,mime,bytes,size_bytes) VALUES($1,$2,$3,$4,$5)',[id,req.user.id,mime,bytes,bytes.length]);
   res.status(201).json({url:'/media/'+id,size:bytes.length});
 }));
+const catalogFields='id,seller_id,name,description,category,price,old_price,stock,stock_mode,restock_days,sold_count,image_url,card_background,detail_background,badge,external_links,created_at';
+const feedSort={ newest:{order:'id DESC',key:'id'}, price_asc:{order:'price ASC,id DESC',key:'price'},price_desc:{order:'price DESC,id DESC',key:'price'},popular:{order:'sold_count DESC,id DESC',key:'sold_count'} };
+const encodeCursor=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
+const decodeCursor=(value,sort,q,category)=>{
+  if(!value) return null;
+  if(typeof value!=='string'||value.length>400) throw fail(400,'Katalog kursori xato.');
+  try {
+    const c=JSON.parse(Buffer.from(value,'base64url').toString('utf8'));
+    if(!Array.isArray(c)||c.length!==5||c[0]!==sort||c[1]!==q||c[2]!==category||!Number.isSafeInteger(c[3])||!Number.isSafeInteger(c[4])||c[4]<1) throw Error();
+    return c;
+  } catch { throw fail(400,'Katalog kursori xato.'); }
+};
+app.get('/api/catalog/feed',route(async(req,res)=>{
+  const q=text(req.query.q,80),category=text(req.query.category,40),sort=feedSort[req.query.sort]?req.query.sort:'newest';
+  const limit=Math.min(36,Math.max(1,Number.parseInt(req.query.limit,10)||24));
+  const cursor=decodeCursor(req.query.cursor,sort,q,category), config=feedSort[sort];
+  if(category && !site.categories.some(x=>x.id===category)) return res.json({products:[],nextCursor:null,hasMore:false});
+  if(demoOnly){
+    let data=inMemoryCatalog.filter(p=>(!category||p.category===category)&&(!q||(p.name+' '+p.description).toLowerCase().includes(q.toLowerCase())));
+    data.sort((a,b)=>sort==='price_asc'?a.price-b.price||b.id-a.id:sort==='price_desc'?b.price-a.price||b.id-a.id:sort==='popular'?b.sold_count-a.sold_count||b.id-a.id:b.id-a.id);
+    if(cursor) data=data.filter(p=>sort==='price_asc'?(p.price>cursor[3]||p.price===cursor[3]&&p.id<cursor[4]):sort==='price_desc'?(p.price<cursor[3]||p.price===cursor[3]&&p.id<cursor[4]):sort==='popular'?(p.sold_count<cursor[3]||p.sold_count===cursor[3]&&p.id<cursor[4]):p.id<cursor[4]);
+    const products=data.slice(0,limit),last=products.at(-1);return res.json({products,hasMore:data.length>limit,nextCursor:data.length>limit?encodeCursor([sort,q,category,last[config.key],last.id]):null});
+  }
+  const params=['active'],where=['status=$1'];
+  if(q){params.push('%'+q.replace(/[\\%_]/g,'\\$&')+'%');where.push(`(name ILIKE $${params.length} ESCAPE '\\' OR description ILIKE $${params.length} ESCAPE '\\')`);}
+  if(category){params.push(category);where.push(`category=$${params.length}`);}
+  if(cursor){params.push(cursor[3],cursor[4]);const a=params.length-1,b=params.length;where.push(config.key==='id'?`id<$${b}`:sort==='price_asc'?`(price>$${a} OR (price=$${a} AND id<$${b}))`:`(${config.key}<$${a} OR (${config.key}=$${a} AND id<$${b}))`);}
+  params.push(limit+1);
+  const {rows}=await pool.query(`SELECT ${catalogFields} FROM products WHERE ${where.join(' AND ')} ORDER BY ${config.order} LIMIT $${params.length}`,params);
+  const products=rows.slice(0,limit),last=products.at(-1),hasMore=rows.length>limit;
+  res.json({products,hasMore,nextCursor:hasMore?encodeCursor([sort,q,category,Number(last[config.key]),Number(last.id)]):null});
+}));
 app.get('/api/catalog', route(async (req, res) => {
   const q = text(req.query.q, 80), category = text(req.query.category, 40), sort = text(req.query.sort, 20);
   const page = Math.min(100, Math.max(1, Number.parseInt(req.query.page, 10) || 1)), limit = 16;
-  const order = { newest: 'created_at DESC, id DESC', price_asc: 'price ASC, id DESC', price_desc: 'price DESC, id DESC', popular: 'id ASC' }[sort] || 'created_at DESC, id DESC';
+  const order = { newest: 'id DESC', price_asc: 'price ASC, id DESC', price_desc: 'price DESC, id DESC', popular: 'sold_count DESC,id DESC' }[sort] || 'id DESC';
   if (demoOnly) { let p = inMemoryCatalog.filter(x => (!q || (x.name + ' ' + x.description).toLowerCase().includes(q.toLowerCase())) && (!category || x.category === category)); p = sort === 'price_asc' ? p.sort((a,b) => a.price-b.price) : sort === 'price_desc' ? p.sort((a,b) => b.price-a.price) : p; return res.json({ products: p.slice((page-1)*limit,page*limit), total: p.length, page, pages: Math.ceil(p.length/limit) }); }
   const where = ['status=$1']; const params = ['active'];
   if (q) { params.push('%' + q.replace(/[\\%_]/g, '\\$&') + '%'); where.push(`(name ILIKE $${params.length} ESCAPE '\\' OR description ILIKE $${params.length} ESCAPE '\\')`); }
@@ -124,14 +158,49 @@ app.get('/api/catalog', route(async (req, res) => {
   const condition = where.join(' AND ');
   const count = await pool.query(`SELECT count(*)::int AS total FROM products WHERE ${condition}`, params);
   params.push(limit, (page-1)*limit);
-  const data = await pool.query(`SELECT id, seller_id, name, description, category, price, old_price, stock, image_url, card_background, detail_background, badge, external_links, created_at FROM products WHERE ${condition} ORDER BY ${order} LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+  const data = await pool.query(`SELECT ${catalogFields} FROM products WHERE ${condition} ORDER BY ${order} LIMIT $${params.length-1} OFFSET $${params.length}`, params);
   const total = count.rows[0].total; res.json({ products: data.rows, total, page, pages: Math.ceil(total/limit) });
 }));
 app.get('/api/products/:id', route(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) throw fail(404, 'Mahsulot topilmadi.');
   if (demoOnly) { const product = inMemoryCatalog.find(p => p.id === Number(req.params.id)); if (!product) throw fail(404, 'Mahsulot topilmadi.'); return res.json({ product }); }
-  const { rows } = await pool.query("SELECT p.id,p.name,p.description,p.category,p.price,p.old_price,p.stock,p.image_url,p.card_background,p.detail_background,p.badge,p.external_links,p.created_at,u.full_name AS seller_name FROM products p LEFT JOIN users u ON p.seller_id=u.id WHERE p.id=$1 AND p.status='active'", [req.params.id]);
+  const { rows } = await pool.query("SELECT p.*,u.full_name AS seller_name,u.avatar_url AS seller_avatar FROM products p LEFT JOIN users u ON p.seller_id=u.id WHERE p.id=$1 AND p.status='active'", [req.params.id]);
   if (!rows[0]) throw fail(404, 'Mahsulot topilmadi.'); res.json({ product: rows[0] });
+}));
+app.get('/api/recommendations',route(async(req,res)=>{
+  const contextId=/^\d+$/.test(String(req.query.productId||''))?String(req.query.productId):null;
+  const limit=Math.min(16,Math.max(1,Number.parseInt(req.query.limit,10)||12));
+  const validKind=['for-you','together','trending'].includes(req.query.kind)?req.query.kind:'for-you';
+  if(demoOnly) return res.json({products:rankProducts(inMemoryCatalog,null,{context:contextId?inMemoryCatalog.find(p=>String(p.id)===contextId):null,limit}),personalized:false});
+  const sessionId=tokenId(cookieValue(req,'marketuz_session')||'');
+  const current=sessionId?(await pool.query('SELECT personalization_enabled FROM users WHERE id=$1',[sessionId])).rows[0]:null;
+  const personalized=!!current?.personalization_enabled && validKind==='for-you';
+  let interests=null;
+  if(personalized){
+    const [events,favorites,purchases]=await Promise.all([
+      pool.query("SELECT e.kind,e.query,e.duration_seconds,e.created_at,p.id,p.category,p.name,p.price FROM product_events e LEFT JOIN products p ON p.id=e.product_id WHERE e.user_id=$1 AND e.created_at>now()-interval '90 days' ORDER BY e.created_at DESC LIMIT 160",[sessionId]),
+      pool.query('SELECT p.id,p.category,p.name,p.price FROM favorites f JOIN products p ON p.id=f.product_id WHERE f.user_id=$1 ORDER BY p.id DESC LIMIT 80',[sessionId]),
+      pool.query("SELECT p.id,p.category,p.name,p.price FROM orders o JOIN order_items i ON i.order_id=o.id JOIN products p ON p.id=i.product_id WHERE o.buyer_id=$1 AND o.status!='cancelled' ORDER BY o.created_at DESC LIMIT 80",[sessionId])
+    ]);
+    interests=buildInterests(events.rows,favorites.rows,purchases.rows);
+  }
+  const context=contextId?(await pool.query("SELECT id,category,price FROM products WHERE id=$1 AND status='active'",[contextId])).rows[0]:null;
+  const pairs=new Map();
+  if(context){
+    const {rows}=await pool.query("SELECT i2.product_id AS id,count(*)::int AS count FROM order_items i1 JOIN orders o ON o.id=i1.order_id JOIN order_items i2 ON i2.order_id=i1.order_id AND i2.product_id<>i1.product_id WHERE i1.product_id=$1 AND o.status!='cancelled' GROUP BY i2.product_id ORDER BY count DESC LIMIT 30",[contextId]);
+    rows.forEach(p=>pairs.set(String(p.id),p.count));
+  }
+  const categories=interests?[...interests.categories.entries()].sort((a,b)=>b[1]-a[1]).slice(0,3).map(x=>x[0]):[];
+  const candidateQueries=[
+    pool.query("SELECT * FROM products WHERE status='active' AND (stock_mode='replenishable' OR stock>0) ORDER BY sold_count DESC,id DESC LIMIT 80"),
+    pool.query("SELECT * FROM products WHERE status='active' AND (stock_mode='replenishable' OR stock>0) ORDER BY id DESC LIMIT 80")
+  ];
+  if(categories.length) candidateQueries.push(pool.query("SELECT * FROM products WHERE status='active' AND category=ANY($1::text[]) AND (stock_mode='replenishable' OR stock>0) ORDER BY id DESC LIMIT 100",[categories]));
+  if(context) candidateQueries.push(pool.query("SELECT * FROM products WHERE status='active' AND category=$1 AND (stock_mode='replenishable' OR stock>0) ORDER BY id DESC LIMIT 60",[context.category]));
+  if(pairs.size) candidateQueries.push(pool.query("SELECT * FROM products WHERE id=ANY($1::bigint[]) AND status='active'",[[...pairs.keys()]]));
+  const results=await Promise.all(candidateQueries);
+  const products=rankProducts(results.flatMap(x=>x.rows),validKind==='trending'?null:interests,{context:validKind==='trending'?null:context,together:validKind==='trending'?new Map():pairs,limit});
+  res.json({products,personalized});
 }));
 
 app.post('/api/auth/register', requireDb, rateAuth, route(async (req, res) => {
@@ -179,10 +248,46 @@ app.post('/api/telegram/webhook', route(async(req,res)=>{
 app.post('/api/auth/logout', (req, res) => { res.clearCookie('marketuz_session', { path: '/' }); res.json({ ok: true }); });
 app.get('/api/me', requireDb, auth, (req, res) => res.json({ user: req.user }));
 app.patch('/api/me', requireDb, auth, route(async (req, res) => {
-  const name = text(req.body.name), phone = text(req.body.phone, 30);
+  const name = text(req.body.name), phone = text(req.body.phone, 30),bio=text(req.body.bio,300),avatar=text(req.body.avatarUrl,1000),cover=text(req.body.coverUrl,1000);
   if (name.length < 2 || (phone && !/^\+?[\d\s()-]{9,25}$/.test(phone))) throw fail(400, 'Ism yoki telefon raqami xato.');
-  const { rows } = await pool.query('UPDATE users SET full_name=$1, phone=$2 WHERE id=$3 RETURNING id,full_name,email,phone,role,seller_status', [name, phone, req.user.id]); res.json({ user: rows[0] });
+  if((avatar&&!imageOk(avatar))||(cover&&!imageOk(cover))) throw fail(400,'Profil rasmi yoki fon havolasi xato.');
+  const { rows } = await pool.query('UPDATE users SET full_name=$1,phone=$2,bio=$3,avatar_url=$4,cover_url=$5 WHERE id=$6 RETURNING id,full_name,email,phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled', [name,phone,bio,avatar,cover,req.user.id]); res.json({ user: rows[0] });
 }));
+app.patch('/api/me/personalization',requireDb,auth,route(async(req,res)=>{
+  if(typeof req.body.enabled!=='boolean') throw fail(400,'Tanlov xato.');
+  const db=await pool.connect();
+  try { await db.query('BEGIN');await db.query('UPDATE users SET personalization_enabled=$1 WHERE id=$2',[req.body.enabled,req.user.id]);if(!req.body.enabled) await db.query('DELETE FROM product_events WHERE user_id=$1',[req.user.id]);await db.query('COMMIT');res.json({enabled:req.body.enabled}); }
+  catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
+}));
+app.delete('/api/me/activity',requireDb,auth,route(async(req,res)=>{await pool.query('DELETE FROM product_events WHERE user_id=$1',[req.user.id]);res.json({ok:true});}));
+app.post('/api/events',requireDb,auth,route(async(req,res)=>{
+  if(!req.user.personalization_enabled) return res.json({recorded:false});
+  const kind=text(req.body.kind,12),query=text(req.body.query,80),productId=Number(req.body.productId),duration=Number(req.body.durationSeconds||0);
+  if(!['search','view','dwell','cart'].includes(kind)||kind==='search'&&query.length<2||kind!=='search'&&(!Number.isSafeInteger(productId)||productId<1)||!Number.isSafeInteger(duration)||duration<0||duration>180||kind==='dwell'&&duration<5) throw fail(400,'Faoliyat ma’lumoti xato.');
+  if(kind!=='search'){const found=await pool.query("SELECT id FROM products WHERE id=$1 AND status='active'",[productId]);if(!found.rowCount) throw fail(404,'Mahsulot topilmadi.');}
+  const result=await pool.query("INSERT INTO product_events(user_id,product_id,kind,query,duration_seconds) SELECT $1,$2,$3,$4,$5 WHERE (SELECT count(*) FROM product_events WHERE user_id=$1 AND created_at>now()-interval '1 day')<300",[req.user.id,kind==='search'?null:productId,kind,kind==='search'?query:'',kind==='dwell'?duration:0]);
+  res.status(result.rowCount?201:429).json({recorded:!!result.rowCount});
+}));
+app.get('/api/me/follows',requireDb,auth,route(async(req,res)=>{
+  const {rows}=await pool.query('SELECT u.id,u.full_name,u.avatar_url,u.cover_url,u.bio,(SELECT count(*)::int FROM products p WHERE p.seller_id=u.id AND p.status=\'active\') AS product_count FROM seller_follows f JOIN users u ON u.id=f.seller_id WHERE f.buyer_id=$1 ORDER BY f.created_at DESC LIMIT 100',[req.user.id]);res.json({sellers:rows});
+}));
+app.get('/api/shops/:id',requireDb,route(async(req,res)=>{
+  if(!/^\d+$/.test(req.params.id)) throw fail(404,'Do‘kon topilmadi.');
+  const {rows}=await pool.query("SELECT u.id,u.full_name,u.avatar_url,u.cover_url,u.bio,u.created_at,(SELECT count(*)::int FROM seller_follows WHERE seller_id=u.id) AS followers,(SELECT count(*)::int FROM products WHERE seller_id=u.id AND status='active') AS product_count FROM users u WHERE u.id=$1 AND u.role='seller'",[req.params.id]);
+  if(!rows[0]) throw fail(404,'Do‘kon topilmadi.');
+  const cursor=/^\d+$/.test(String(req.query.cursor||''))?Number(req.query.cursor):null;
+  const {rows:products}=await pool.query(`SELECT ${catalogFields} FROM products WHERE seller_id=$1 AND status='active' ${cursor?'AND id<$2':''} ORDER BY id DESC LIMIT 25`,cursor?[req.params.id,cursor]:[req.params.id]);
+  const sessionId=tokenId(cookieValue(req,'marketuz_session')||'');let following=false;
+  if(sessionId) following=!!(await pool.query('SELECT 1 FROM seller_follows WHERE seller_id=$1 AND buyer_id=$2',[req.params.id,sessionId])).rowCount;
+  res.json({seller:rows[0],products:products.slice(0,24),nextCursor:products.length>24?String(products[23].id):null,following});
+}));
+app.put('/api/shops/:id/follow',requireDb,auth,route(async(req,res)=>{
+  if(!/^\d+$/.test(req.params.id)||String(req.params.id)===String(req.user.id)) throw fail(400,'Do‘kon xato.');
+  const {rowCount}=await pool.query("INSERT INTO seller_follows(buyer_id,seller_id) SELECT $1,id FROM users WHERE id=$2 AND role='seller' ON CONFLICT DO NOTHING",[req.user.id,req.params.id]);
+  if(!rowCount){const found=await pool.query("SELECT id FROM users WHERE id=$1 AND role='seller'",[req.params.id]);if(!found.rowCount) throw fail(404,'Do‘kon topilmadi.');}
+  res.json({following:true});
+}));
+app.delete('/api/shops/:id/follow',requireDb,auth,route(async(req,res)=>{await pool.query('DELETE FROM seller_follows WHERE buyer_id=$1 AND seller_id=$2',[req.user.id,req.params.id]);res.json({following:false});}));
 app.post('/api/me/password', requireDb, auth, rateAuth, route(async (req, res) => {
   const old = String(req.body.currentPassword || ''), next = String(req.body.newPassword || '');
   const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
@@ -191,7 +296,7 @@ app.post('/api/me/password', requireDb, auth, rateAuth, route(async (req, res) =
   await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [await hashPassword(next),req.user.id]); res.json({ ok: true });
 }));
 app.get('/api/favorites', requireDb, auth, route(async (req, res) => {
-  const { rows } = await pool.query("SELECT p.id,p.name,p.description,p.category,p.price,p.old_price,p.stock,p.image_url,p.badge FROM favorites f JOIN products p ON p.id=f.product_id WHERE f.user_id=$1 AND p.status='active' ORDER BY p.id DESC", [req.user.id]); res.json({ products: rows });
+  const { rows } = await pool.query(`SELECT ${catalogFields.split(',').map(x=>'p.'+x).join(',')} FROM favorites f JOIN products p ON p.id=f.product_id WHERE f.user_id=$1 AND p.status='active' ORDER BY p.id DESC LIMIT 100`, [req.user.id]); res.json({ products: rows });
 }));
 app.put('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const { rowCount } = await pool.query("INSERT INTO favorites(user_id,product_id) SELECT $1,id FROM products WHERE id=$2 AND status='active' ON CONFLICT DO NOTHING", [req.user.id,req.params.id]); res.json({ ok: true, added: !!rowCount }); }));
 app.delete('/api/favorites/:id', requireDb, auth, route(async (req, res) => { await pool.query('DELETE FROM favorites WHERE user_id=$1 AND product_id=$2', [req.user.id,req.params.id]); res.json({ ok: true }); }));
@@ -209,15 +314,16 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
   try {
     await db.query('BEGIN');
     const ids = items.map(x => x.id).sort((a,b) => a-b);
-    const locked = await db.query('SELECT id,name,price,stock,image_url,seller_id FROM products WHERE id=ANY($1::bigint[]) AND status=$2 ORDER BY id FOR UPDATE', [ids,'active']);
+    const locked = await db.query('SELECT id,name,price,stock,stock_mode,image_url,seller_id FROM products WHERE id=ANY($1::bigint[]) AND status=$2 ORDER BY id FOR UPDATE', [ids,'active']);
     if (locked.rows.length !== ids.length) throw fail(409, 'Savatdagi ayrim mahsulotlar endi mavjud emas.');
     let subtotal = 0; const detailed = [];
-    for (const p of locked.rows) { const qty = items.find(i => i.id === Number(p.id)).qty; if (p.stock < qty) throw fail(409, `${p.name}: ombordagi miqdor yetarli emas.`); subtotal += p.price * qty; if(subtotal>2_000_000_000) throw fail(400,'Buyurtma summasi limitdan oshdi.'); detailed.push({ ...p, qty }); }
+    for (const p of locked.rows) { const qty = items.find(i => i.id === Number(p.id)).qty; if (p.stock_mode!=='replenishable' && p.stock < qty) throw fail(409, `${p.name}: ombordagi miqdor yetarli emas.`); subtotal += p.price * qty; if(subtotal>2_000_000_000) throw fail(400,'Buyurtma summasi limitdan oshdi.'); detailed.push({ ...p, qty }); }
+    if(method!=='cod' && detailed.some(p=>p.stock_mode==='replenishable')) throw fail(409,'Buyurtma asosida keladigan mahsulot uchun to‘lov operator tasdiqlaganidan keyin kelishiladi. Yetkazilganda to‘lovni tanlang.');
     const id = randomUUID();
     await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,total,status,payment_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending']);
     for (const p of detailed) {
-      await db.query('UPDATE products SET stock=stock-$1, updated_at=now() WHERE id=$2', [p.qty,p.id]);
-      await db.query('INSERT INTO order_items(order_id,product_id,seller_id,title,image_url,price,quantity) VALUES($1,$2,$3,$4,$5,$6,$7)', [id,p.id,p.seller_id,p.name,p.image_url,p.price,p.qty]);
+      await db.query("UPDATE products SET stock=CASE WHEN stock_mode='tracked' THEN stock-$1 ELSE stock END,sold_count=sold_count+$1,updated_at=now() WHERE id=$2", [p.qty,p.id]);
+      await db.query('INSERT INTO order_items(order_id,product_id,seller_id,title,image_url,price,quantity,stock_reserved) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [id,p.id,p.seller_id,p.name,p.image_url,p.price,p.qty,p.stock_mode==='tracked']);
     }
     await db.query('COMMIT'); res.status(201).json({ id, subtotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:paymentUrl(method,id,subtotal), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. To‘lovni provayder sahifasida yakunlang.' });
   } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
@@ -235,7 +341,7 @@ app.get('/api/orders/:id/payment-link', requireDb, auth, route(async(req,res)=>{
 }));
 async function cancelOrder(id, buyerId) {
   const db = await pool.connect();
-  try { await db.query('BEGIN'); const { rows } = await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id]); const o = rows[0]; if (!o || (buyerId && String(o.buyer_id) !== String(buyerId))) throw fail(404,'Buyurtma topilmadi.'); if (!['awaiting_payment','new','accepted','packing'].includes(o.status) || o.payment_status==='paid') throw fail(409,'Bu buyurtmani bekor qilib bo‘lmaydi.'); const reserved=await db.query('SELECT id FROM payment_transactions WHERE order_id=$1 AND state=1 LIMIT 1',[id]); if(reserved.rowCount) throw fail(409,'To‘lov jarayonda. Yakunlanishini kuting.'); await db.query("UPDATE orders SET status='cancelled',updated_at=now() WHERE id=$1",[id]); const items = await db.query('SELECT product_id,quantity FROM order_items WHERE order_id=$1',[id]); for(const x of items.rows) await db.query('UPDATE products SET stock=stock+$1 WHERE id=$2',[x.quantity,x.product_id]); await db.query('COMMIT'); return o; } catch(e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
+  try { await db.query('BEGIN'); const { rows } = await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id]); const o = rows[0]; if (!o || (buyerId && String(o.buyer_id) !== String(buyerId))) throw fail(404,'Buyurtma topilmadi.'); if (!['awaiting_payment','new','accepted','packing'].includes(o.status) || o.payment_status==='paid') throw fail(409,'Bu buyurtmani bekor qilib bo‘lmaydi.'); const reserved=await db.query('SELECT id FROM payment_transactions WHERE order_id=$1 AND state=1 LIMIT 1',[id]); if(reserved.rowCount) throw fail(409,'To‘lov jarayonda. Yakunlanishini kuting.'); await db.query("UPDATE orders SET status='cancelled',updated_at=now() WHERE id=$1",[id]); const items = await db.query('SELECT product_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[id]); for(const x of items.rows) await db.query('UPDATE products SET stock=stock+$1,sold_count=GREATEST(0,sold_count-$2) WHERE id=$3',[x.stock_reserved?x.quantity:0,x.quantity,x.product_id]); await db.query('COMMIT'); return o; } catch(e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
 }
 app.post('/api/orders/:id/cancel', requireDb, auth, route(async (req,res) => { await cancelOrder(req.params.id,req.user.id); res.json({ ok:true }); }));
 
@@ -244,14 +350,14 @@ app.post('/api/seller/request', requireDb, auth, route(async (req,res) => {
   if (req.user.seller_status === 'pending') return res.json({ ok:true, status:'pending' });
   await pool.query("UPDATE users SET seller_status='pending' WHERE id=$1 AND role='buyer'",[req.user.id]); res.json({ ok:true, status:'pending' });
 }));
-app.get('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const { rows } = await pool.query('SELECT * FROM products WHERE seller_id=$1 ORDER BY created_at DESC LIMIT 100',[req.user.id]); res.json({ products: rows }); }));
+app.get('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const cursor=/^\d+$/.test(String(req.query.cursor||''))?Number(req.query.cursor):null;const { rows } = await pool.query(`SELECT * FROM products WHERE seller_id=$1 ${cursor?'AND id<$2':''} ORDER BY id DESC LIMIT 51`,cursor?[req.user.id,cursor]:[req.user.id]);res.json({products:rows.slice(0,50),nextCursor:rows.length>50?String(rows[49].id):null}); }));
 function productInput(body) {
-  const p = { name:text(body.name,180), description:text(body.description,2000), category:text(body.category,40), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock), image:text(body.image,1000), cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]) };
-  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !imageOk(p.image) || (p.cardBackground&&!imageOk(p.cardBackground)) || (p.detailBackground&&!imageOk(p.detailBackground)) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmlarini tekshiring.');
+  const p = { name:text(body.name,180), description:text(body.description,2000), category:text(body.category,40), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock),stockMode:text(body.stockMode||'tracked',20),restockDays:Number(body.restockDays||7), image:text(body.image,1000), cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]) };
+  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !['tracked','replenishable'].includes(p.stockMode) || !Number.isSafeInteger(p.restockDays) || p.restockDays<1 || p.restockDays>90 || !imageOk(p.image) || (p.cardBackground&&!imageOk(p.cardBackground)) || (p.detailBackground&&!imageOk(p.detailBackground)) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmlarini tekshiring.');
   return p;
 }
-app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const p = productInput(req.body); const { rows } = await pool.query("INSERT INTO products(seller_id,name,description,category,price,old_price,stock,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending') RETURNING *",[req.user.id,p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks)]); res.status(201).json({ product:rows[0] }); }));
-app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const p=productInput(req.body); const { rows }=await pool.query("UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,image_url=$7,card_background=$8,detail_background=$9,external_links=$10,status='pending',updated_at=now() WHERE id=$11 AND seller_id=$12 AND status!='archived' RETURNING *",[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
+app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const p = productInput(req.body); const { rows } = await pool.query("INSERT INTO products(seller_id,name,description,category,price,old_price,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending') RETURNING *",[req.user.id,p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks)]); res.status(201).json({ product:rows[0] }); }));
+app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const p=productInput(req.body); const { rows }=await pool.query("UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,stock_mode=$7,restock_days=$8,image_url=$9,card_background=$10,detail_background=$11,external_links=$12,status='pending',updated_at=now() WHERE id=$13 AND seller_id=$14 AND status!='archived' RETURNING *",[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
 app.delete('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const result=await pool.query("UPDATE products SET status='archived',updated_at=now() WHERE id=$1 AND seller_id=$2 RETURNING id",[req.params.id,req.user.id]); if(!result.rowCount) throw fail(404,'Mahsulot topilmadi.'); res.json({ok:true}); }));
 app.get('/api/seller/orders', requireDb, auth, role('seller'), route(async (req,res) => { const { rows }=await pool.query('SELECT i.*,o.status AS order_status,o.created_at,o.region,o.district,o.recipient,o.phone FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.seller_id=$1 ORDER BY o.created_at DESC LIMIT 100',[req.user.id]); res.json({items:rows}); }));
 app.patch('/api/seller/order-items/:id', requireDb, auth, role('seller'), route(async (req,res) => { const status=text(req.body.status,20); if(!['packing','ready'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE order_items i SET fulfillment_status=$1 FROM orders o WHERE i.id=$2 AND i.seller_id=$3 AND i.order_id=o.id AND o.status NOT IN ('awaiting_payment','cancelled','delivered') RETURNING i.*",[status,req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Buyurtma topilmadi.'); res.json({item:rows[0]}); }));
@@ -259,18 +365,18 @@ app.patch('/api/seller/order-items/:id', requireDb, auth, role('seller'), route(
 app.get('/api/admin/overview', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT (SELECT count(*)::int FROM users) AS users,(SELECT count(*)::int FROM users WHERE seller_status='pending') AS seller_requests,(SELECT count(*)::int FROM products WHERE status='pending') AS pending_products,(SELECT count(*)::int FROM products WHERE status='active') AS active_products,(SELECT count(*)::int FROM orders WHERE status!='cancelled') AS orders,(SELECT coalesce(sum(subtotal),0)::bigint FROM orders WHERE status!='cancelled') AS order_value"); res.json({stats:rows[0]}); }));
 app.get('/api/admin/sellers', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT id,full_name,email,phone,role,seller_status,created_at FROM users WHERE seller_status IN ('pending','approved','rejected') ORDER BY created_at DESC LIMIT 100"); res.json({sellers:rows}); }));
 app.patch('/api/admin/sellers/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['approved','rejected'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE users SET seller_status=$1,role=CASE WHEN $3 THEN 'seller' ELSE 'buyer' END WHERE id=$2 AND role!='admin' RETURNING id,full_name,email,seller_status",[status,req.params.id,status==='approved']); if(!rows[0]) throw fail(404,'Sotuvchi topilmadi.'); res.json({seller:rows[0]}); }));
-app.get('/api/admin/products', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT p.*,u.full_name AS seller_name FROM products p LEFT JOIN users u ON u.id=p.seller_id ORDER BY CASE WHEN p.status='pending' THEN 0 ELSE 1 END,p.created_at DESC LIMIT 100"); res.json({products:rows}); }));
+app.get('/api/admin/products', requireDb, auth, role('admin'), route(async (req,res) => { const cursor=decodeCursor(req.query.cursor,'admin','','');let where='';const params=[];if(cursor){params.push(cursor[3],cursor[4]);where="WHERE (CASE WHEN p.status='pending' THEN 0 ELSE 1 END)>$1 OR ((CASE WHEN p.status='pending' THEN 0 ELSE 1 END)=$1 AND p.id<$2)";}const {rows}=await pool.query(`SELECT p.*,u.full_name AS seller_name FROM products p LEFT JOIN users u ON u.id=p.seller_id ${where} ORDER BY CASE WHEN p.status='pending' THEN 0 ELSE 1 END,p.id DESC LIMIT 51`,params);const products=rows.slice(0,50),last=products.at(-1);res.json({products,nextCursor:rows.length>50?encodeCursor(['admin','','',last.status==='pending'?0:1,Number(last.id)]):null}); }));
 app.post('/api/admin/products', requireDb, auth, role('admin'), route(async(req,res)=>{
   const p=productInput(req.body),status=text(req.body.status,20);
   if(!['active','pending'].includes(status)) throw fail(400,'Yangi mahsulot holati xato.');
-  const {rows}=await pool.query('INSERT INTO products(name,description,category,price,old_price,stock,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status]);
+  const {rows}=await pool.query('INSERT INTO products(name,description,category,price,old_price,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status]);
   res.status(201).json({product:rows[0]});
 }));
 app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,req.params.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
 app.patch('/api/admin/products/:id/details', requireDb, auth, role('admin'), route(async(req,res)=>{
   const p=productInput(req.body), status=text(req.body.status,20);
   if(!['active','pending','rejected','archived'].includes(status)) throw fail(400,'Mahsulot holati xato.');
-  const {rows}=await pool.query('UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,image_url=$7,card_background=$8,detail_background=$9,external_links=$10,status=$11,updated_at=now() WHERE id=$12 RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status,req.params.id]);
+  const {rows}=await pool.query('UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,stock_mode=$7,restock_days=$8,image_url=$9,card_background=$10,detail_background=$11,external_links=$12,status=$13,updated_at=now() WHERE id=$14 RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status,req.params.id]);
   if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]});
 }));
 app.get('/api/admin/orders', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query('SELECT o.*,u.email AS buyer_email FROM orders o JOIN users u ON u.id=o.buyer_id ORDER BY o.created_at DESC LIMIT 100'); res.json({orders:rows}); }));
@@ -282,7 +388,7 @@ const htmlEsc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>
 const absolute=(url,base)=>{try{return new URL(url,base).href;}catch{return base;}};
 app.get('/robots.txt',(req,res)=>res.type('text/plain').send(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /account\nDisallow: /checkout\nSitemap: ${site.seo.siteUrl}/sitemap.xml\n`));
 app.get('/sitemap.xml',route(async(req,res)=>{
-  const urls=['/','/catalog','/delivery','/terms','/privacy'];
+  const urls=['/','/catalog','/discover','/delivery','/terms','/privacy'];
   if(pool){const {rows}=await pool.query("SELECT id FROM products WHERE status='active' ORDER BY id DESC LIMIT 10000"); urls.push(...rows.map(x=>`/product/${x.id}`));}
   res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(u=>`<url><loc>${htmlEsc(site.seo.siteUrl+u)}</loc></url>`).join('')}</urlset>`);
 }));
@@ -293,8 +399,8 @@ app.get('*', route(async (req,res) => {
   let title=site.seo.title, description=site.seo.description, picture=site.seo.ogImage, type='website', structured='';
   const match=req.path.match(/^\/product\/(\d+)$/);
   if(match){
-    const p=pool?(await pool.query("SELECT id,name,description,price,stock,image_url FROM products WHERE id=$1 AND status='active'",[match[1]])).rows[0]:inMemoryCatalog.find(x=>x.id===Number(match[1]));
-    if(p){title=`${p.name} | ${site.brand.name}`;description=p.description.slice(0,230)||site.seo.description;picture=p.image_url;type='product';structured=`<script type="application/ld+json">${JSON.stringify({'@context':'https://schema.org','@type':'Product',name:p.name,description:p.description,image:absolute(p.image_url,site.seo.siteUrl),offers:{'@type':'Offer',priceCurrency:'UZS',price:p.price,availability:p.stock>0?'https://schema.org/InStock':'https://schema.org/OutOfStock',url:site.seo.siteUrl+req.path}}).replace(/</g,'\\u003c')}</script>`;}
+    const p=pool?(await pool.query("SELECT id,name,description,price,stock,stock_mode,image_url FROM products WHERE id=$1 AND status='active'",[match[1]])).rows[0]:inMemoryCatalog.find(x=>x.id===Number(match[1]));
+    if(p){title=`${p.name} | ${site.brand.name}`;description=p.description.slice(0,230)||site.seo.description;picture=p.image_url;type='product';structured=`<script type="application/ld+json">${JSON.stringify({'@context':'https://schema.org','@type':'Product',name:p.name,description:p.description,image:absolute(p.image_url,site.seo.siteUrl),offers:{'@type':'Offer',priceCurrency:'UZS',price:p.price,availability:p.stock_mode==='replenishable'?'https://schema.org/PreOrder':p.stock>0?'https://schema.org/InStock':'https://schema.org/OutOfStock',url:site.seo.siteUrl+req.path}}).replace(/</g,'\\u003c')}</script>`;}
   }
   const canonical=site.seo.siteUrl+req.path;
   const extra=`<link rel="canonical" href="${htmlEsc(canonical)}"><meta property="og:type" content="${type}"><meta property="og:site_name" content="${htmlEsc(site.brand.name)}"><meta property="og:title" content="${htmlEsc(title)}"><meta property="og:description" content="${htmlEsc(description)}"><meta property="og:image" content="${htmlEsc(absolute(picture,site.seo.siteUrl))}"><meta property="og:url" content="${htmlEsc(canonical)}"><meta name="twitter:card" content="summary_large_image"><meta name="keywords" content="${htmlEsc(site.seo.keywords)}">${structured}`;
@@ -327,5 +433,6 @@ async function initialize() {
   }
 }
 await initialize();
+if(pool){const prune=()=>pool.query("DELETE FROM product_events WHERE id IN (SELECT id FROM product_events WHERE created_at<now()-interval '90 days' ORDER BY id LIMIT 5000)").catch(e=>console.error('Activity pruning:',e.message));prune();setInterval(prune,60*60_000).unref();}
 const server = app.listen(Number(process.env.PORT || 3000),'0.0.0.0',()=>console.log('Marketuz listening on port',server.address().port));
 process.on('SIGTERM',()=>server.close(()=>pool?.end()));

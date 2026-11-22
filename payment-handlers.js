@@ -13,8 +13,8 @@ export function clickSignature(body,secret,complete=false){
 }
 async function releaseOrder(db,orderId,paid=false){
   await db.query("UPDATE orders SET status='cancelled',payment_status=$2,updated_at=now() WHERE id=$1 AND status!='cancelled'",[orderId,paid?'refunded':'cancelled']);
-  const items=await db.query('SELECT product_id,quantity FROM order_items WHERE order_id=$1',[orderId]);
-  for(const p of items.rows) await db.query('UPDATE products SET stock=stock+$1 WHERE id=$2',[p.quantity,p.product_id]);
+  const items=await db.query('SELECT product_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[orderId]);
+  for(const p of items.rows) await db.query('UPDATE products SET stock=stock+$1,sold_count=GREATEST(0,sold_count-$2) WHERE id=$3',[p.stock_reserved?p.quantity:0,p.quantity,p.product_id]);
 }
 export function mountPayments(app,pool,ready){
   app.post('/api/payments/payme',async(req,res)=>{

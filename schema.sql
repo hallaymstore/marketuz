@@ -14,6 +14,15 @@ CREATE TABLE IF NOT EXISTS products (
 );
 CREATE INDEX IF NOT EXISTS idx_products_catalog ON products (status, category, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_products_seller ON products (seller_id, created_at DESC);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_mode VARCHAR(20) NOT NULL DEFAULT 'tracked';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS restock_days INTEGER NOT NULL DEFAULT 7;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_products_feed ON products(status,id DESC);
+CREATE INDEX IF NOT EXISTS idx_products_category_feed ON products(status,category,id DESC);
+CREATE INDEX IF NOT EXISTS idx_products_price_feed ON products(status,price,id DESC);
+CREATE INDEX IF NOT EXISTS idx_products_category_price_feed ON products(status,category,price,id DESC);
+CREATE INDEX IF NOT EXISTS idx_products_popular_feed ON products(status,sold_count DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_products_seller_feed ON products(seller_id,id DESC);
 CREATE TABLE IF NOT EXISTS orders (
  id UUID PRIMARY KEY, buyer_id BIGINT NOT NULL REFERENCES users(id), recipient VARCHAR(120) NOT NULL,
  phone VARCHAR(30) NOT NULL, region VARCHAR(80) NOT NULL, district VARCHAR(100) NOT NULL,
@@ -34,6 +43,9 @@ CREATE TABLE IF NOT EXISTS order_items (
  CHECK(fulfillment_status IN ('new','packing','ready'))
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_seller ON order_items (seller_id, id DESC);
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_reserved BOOLEAN NOT NULL DEFAULT true;
+CREATE INDEX IF NOT EXISTS idx_order_items_product_order ON order_items(product_id,order_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_order_product ON order_items(order_id,product_id);
 CREATE TABLE IF NOT EXISTS favorites (
  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
  PRIMARY KEY (user_id, product_id)
@@ -41,7 +53,34 @@ CREATE TABLE IF NOT EXISTS favorites (
 ALTER TABLE products ADD COLUMN IF NOT EXISTS external_links JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS card_background TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS detail_background TEXT NOT NULL DEFAULT '';
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='products_stock_mode_check') THEN
+  ALTER TABLE products ADD CONSTRAINT products_stock_mode_check CHECK(stock_mode IN ('tracked','replenishable'));
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='products_restock_days_check') THEN
+  ALTER TABLE products ADD CONSTRAINT products_restock_days_check CHECK(restock_days BETWEEN 1 AND 90);
+ END IF;
+END $$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS cover_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bio VARCHAR(300) NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS personalization_enabled BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS product_events (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ product_id BIGINT REFERENCES products(id) ON DELETE SET NULL,
+ kind VARCHAR(12) NOT NULL CHECK(kind IN ('search','view','dwell','cart')),
+ query VARCHAR(80) NOT NULL DEFAULT '', duration_seconds INTEGER NOT NULL DEFAULT 0,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_product_events_user_time ON product_events(user_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_events_time ON product_events(created_at);
+CREATE TABLE IF NOT EXISTS seller_follows (
+ buyer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ seller_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(buyer_id,seller_id)
+);
+CREATE INDEX IF NOT EXISTS idx_seller_follows_seller ON seller_follows(seller_id);
 CREATE TABLE IF NOT EXISTS site_settings (
  key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  updated_by BIGINT REFERENCES users(id)
