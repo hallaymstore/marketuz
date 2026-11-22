@@ -1,22 +1,35 @@
 # Marketuz
 
-O‘zbek tilidagi marketplace sinov loyihasi. Node.js + Express + PostgreSQL. Bitta xizmat frontend va API'ni beradi; shu sababli Render `nodechat` workspace'ga bitta web service va alohida PostgreSQL database bilan joylanadi.
+O‘zbekiston bo‘ylab sotuvchi va xaridorlar uchun Node.js/Express/PostgreSQL marketplace. To‘rt fasl va to‘qqiz bayramga moslashtiriladigan responsive web ilova; Telegram Mini App va mobil WebView shu HTTPS manzilni ochadi.
 
 ## Ishga tushirish
 
-Node 20+ kerak. `npm install`, `.env.example` asosida shaxsiy `.env` sozlang va `npm start` bajaring. Node bu loyihada `.env`ni o‘zi o‘qimaydi: mahalliy ishga tushirishda `node --env-file=.env server.js` ishlating. `DATABASE_URL` bo‘lmasa, katalogni ko‘rish uchun namoyish rejimi ochiladi; hisob va buyurtmalar faqat bazaga ulangan holda ishlaydi. `schema.sql` server ishga tushganda bajariladi. Birinchi marta 16 ta namuna mahsulot yuklanadi.
+Node 20+ bilan `npm ci` va `npm start` bajaring. Mahalliy `.env` faylini Node o‘zi o‘qimaydi: `node --env-file=.env server.js` ishlating. `DATABASE_URL` berilmasa katalog ochiladi, ammo hisob, buyurtma va admin yozuvlari ishlamaydi. `schema.sql` ishga tushganda mavjud ma’lumotni saqlab qolgan holda tekshiriladi. `npm run check` va `npm test` kod hamda oddiy API ssenariylarini tekshiradi.
 
-Render: Node runtime, `npm ci` build, `npm start` start, region `frankfurt`, health check `/api/healthz`. `DATABASE_URL` uchun shu regiondagi PostgreSQL ichki URL'i, `SESSION_SECRET` uchun kamida 32 tasodifiy belgi, `ADMIN_EMAIL`/`ADMIN_PASSWORD` uchun administratorga tegishli qiymatlar. Secrets GitHub'ga yuklanmaydi. Production uchun pullik, zaxiralanadigan PostgreSQL va sig‘imni biznes trafikiga qarab tanlang.
+Render: Node runtime, build `npm ci`, start `npm start`, health check `/api/healthz`; PostgreSQL ichki URL manzilini `DATABASE_URL` ga, `SESSION_SECRET` ga kamida 32 belgili noyob kalit, administrator email/parolini `ADMIN_EMAIL`/`ADMIN_PASSWORD` ga kiriting. Parol kamida 16 belgi bo‘lsin. Maxfiy qiymatlarni repoga joylamang.
 
-## Ishlaydigan bo‘limlar
+## Boshqaruv
 
-- Xaridor: katalog, qidirish, saralash, mahsulot sahifasi, savat, sevimlilar, ro‘yxatdan o‘tish/kirish, profil, parol, buyurtma so‘rovi, buyurtma tarixi va bekor qilish.
-- Sotuvchi: ariza, tasdiqdan keyin mahsulot qo‘shish/tahrirlash/arxivlash, buyurtma satrlarini tayyorlash.
-- Administrator: arizalar va mahsulotlarni tasdiqlash, buyurtma holati hamda kuzatuv raqamini yangilash, asosiy ko‘rsatkichlar.
-- PostgreSQL tranzaksiyasi va satr bloklash orqali ombor miqdorini buyurtma vaqtida tekshirish; rollar serverda tekshiriladi. Baza foydalanuvchilar soni ortishi bilan xizmatdan mustaqil ravishda kattalashtiriladi. Indekslar kategoriya, status, buyurtma va sotuvchi bo‘yicha qo‘yilgan.
+`/admin` sahifasi: sotuvchilar va mahsulotlar moderatsiyasi, platforma mahsulotlarini qo‘shish va tahrirlash, buyurtma holatlari va kuzatuv raqami, brend/nom/logotip/favicon, SEO va ulashish rasmlari, kategoriya/karta rasmlari, bosh sahifa matnlari, 20 ta alohida ikonka, qoidalar va aloqa. Administrator PNG/JPEG/WebP rasmni 1.5 MB gacha yuklaydi; fayl PostgreSQL'da saqlanadi. Sozlamalar bazada qoladi, o‘zgarishlar audit jadvaliga yoziladi.
 
-## Sinov bosqichi va ishga tushirish shartlari
+Mavsum tizimi Toshkent sanasi asosida ishlaydi. Qish 20-noyabrdan boshlanadi. Yangi yil, 8-mart, Navro‘z, Xotira va qadrlash kuni, Mustaqillik, Ustozlar kuni va Konstitutsiya kuni oldindan belgilangan oraliqda ko‘rinadi. Ramazon va Hayitning o‘zgaruvchan sanalari admin paneldan qo‘lda belgilanadi. Har bir bayram uchun sarlavha, izoh, fon, hero va gulchambar alohida sozlanadi. Bahor/yoz/kuz/qish rasmlari va maxsus Navro‘z, Mustaqillik, 8-mart, Ustozlar kuni, Hayit san’ati repoda bor.
 
-UzPost API yoki tariflari ulanmagan: admin tashqi jo‘natmaning kuzatuv raqami va holatini qo‘lda kiritadi. Shartnomadan so‘ng rasmiy API hujjatlari, autentifikatsiya va webhooklar asosida alohida adapter qo‘shiladi. Yetkazish narxi hisoblanmaydi va sayt haqiqiy karta to‘lovini qabul qilmaydi. Mahsulot rasmlari hozir HTTPS havola orqali qo‘shiladi; katta katalog uchun huquqlari tekshirilgan rasmlar va S3/R2 turidagi object storage hamda CDN ulanishi lozim.
+Har bir mahsulotda uchta nomlangan HTTPS tashqi havola tahrirlanadi. Mahsulotning o‘z URL'i, Telegram/WhatsApp va OS ulashish funksiyasi mavjud. SEO sahifa sarlavhasi, canonical, Open Graph, Product JSON-LD, sitemap va PWA manifest serverdan yaratiladi. Xaridor: katalog, qidiruv, savat, sevimlilar, hisob, buyurtma. Sotuvchi: ariza, mahsulotlar va jo‘natishga tayyorlash. Tranzaksiyalar buyurtma va ombor sonini bloklash bilan bajariladi.
 
-Rasmiy savdo boshlanishidan oldin yuridik shaxs rekvizitlari, aloqa kanali, qaytarish/oferta va sotuvchi shartlari, shuningdek shaxsga doir ma’lumotlar joylashuvi va qayta ishlanishining huquqiy asosini tasdiqlash kerak. Render bepul PostgreSQL bazasi 30 kundan keyin tugaydi va zaxira nusxasini yaratmaydi; haqiqiy mijoz ma’lumotlarini bunday bazaga joylamang.
+## To‘lovni faollashtirish
+
+Click va Payme hosted checkout hamda signed server callback kodlari tayyor. **Hozir kalitlar va provayder sertifikatsiyasi mavjud bo‘lmaguncha ular faol emas.** Buyurtmada «yetkazilganda to‘lov» ishlaydi. Onlayn to‘lovni ochish uchun:
+
+1. Click/Payme bilan shartnoma va haqiqiy merchant identifikator/kalitlarini oling. Ularni faqat Render environment variables ichiga kiriting; `.env.example` nomlarni ko‘rsatadi.
+2. Provayder kabinetida Click `https://DOMEN/api/payments/click/prepare` va `/complete`, Payme Merchant API `https://DOMEN/api/payments/payme` manzillarini sozlang. Sandbox'da yaratish, qayta callback, bekor qilish, noto‘g‘ri imzo va pul miqdorini tekshiring.
+3. Admin panelda operatorning yuridik nomi, STIR, manzil, telefon, email va qaytarish tartibini to‘ldiring. Jo‘natish narxi mahsulot narxiga kiritilgan biznes modelidagina `SHIPPING_INCLUDED_IN_PRICE=true` o‘rnating. Shundan keyin `PAYMENTS_ENABLED=true` qilib qo‘ying. Tizim shu shartlar bajarilmaguncha onlayn variantlarni ko‘rsatmaydi. Alohida yetkazish tarifi kerak bo‘lsa, to‘lovni yoqmang; avval tarif/checkout hisobini ishlab chiqing.
+
+Payme callbacklari uchun `PAYME_LOGIN` merchant kabinetida beriladigan HTTP Basic login bo‘lib, `PAYME_KEY` bilan tekshiriladi. Click maxfiy kaliti kodga yozilmaydi. Har bir gateway tranzaksiyasi bazada saqlanadi va takroriy xabarlar holat bo‘yicha qayta ishlanadi. Bu integratsiya provayder sandbox va real merchant sertifikatsiyasidan o‘tganini anglatmaydi.
+
+## Telegram va mobil ilova
+
+`TELEGRAM_BOT_TOKEN` va `TELEGRAM_WEBHOOK_SECRET` o‘rnating. So‘ng `MARKETUZ_URL=https://DOMEN node scripts/configure-telegram.mjs` ishlatib bot menu button va webhook'ni sozlang. Telegram Mini App `initData` serverda HMAC va vaqt bo‘yicha tekshiriladi, foydalanuvchi uchun o‘sha do‘kon sessiyasi ochiladi. Android/iOS WebView ayni HTTPS URL'ni ochishi mumkin; checkout tashqi to‘lov havolasini native ilovaga `marketuz:openExternal` xabari bilan beradi. Native APK/IPA alohida loyiha bo‘ladi.
+
+## Savdoga chiqishdan oldin
+
+UzPost API va tariflari shartnoma/texnik hujjatlarsiz ulanmaydi; hozir admin kuzatuv raqamini qo‘lda kiritadi. Rasmiy operator rekvizitlari, oferta/qaytarish tartibi, fiskal chek, shaxsga doir ma’lumotlarning saqlanish hududi va huquqiy asosini mutaxassis bilan yakunlang. Render bepul PostgreSQL vaqtinchalik va zaxira nusxasiz; haqiqiy mijoz ma’lumotlari uchun uzoq muddatli DB, backup, monitoring va tashqi object storage kerak. Katalog ko‘paysa `DB_POOL_MAX`, DB sig‘imi va ilova instansiyalarini o‘lchovga qarab ko‘paytiring.

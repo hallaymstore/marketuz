@@ -11,7 +11,9 @@ test('public preview, search and guarded writes', async () => {
     let healthy=false;
     for(let i=0;i<35;i++) { try { const res=await fetch(base+'/api/healthz'); healthy=res.ok; if(healthy) break; } catch {} await new Promise(r=>setTimeout(r,100)); }
     assert.ok(healthy,'preview server started');
-    const page=await (await fetch(base+'/')).text(); assert.match(page,/Marketuz/); assert.match(page,/bottom-nav/);
+    const page=await (await fetch(base+'/')).text(); assert.match(page,/Marketuz/); assert.match(page,/bottom-nav/); assert.match(page,/rel="canonical"/);assert.doesNotMatch(page,/sinov versiyasi/i);
+    const config=await (await fetch(base+'/api/config')).json();assert.ok(['spring','summer','autumn','winter'].includes(config.seasonal.season));assert.equal(config.site.brand.name,'Marketuz');
+    const productPage=await (await fetch(base+'/product/1')).text();assert.match(productPage,/application\/ld\+json/);assert.match(productPage,/og:image/);
     const catalog=await (await fetch(base+'/api/catalog?category=elektronika&q=Wireless')).json();
     assert.equal(catalog.total,1); assert.equal(catalog.products[0].name,'Wireless Studio quloqchin');
     const notFound=await fetch(base+'/api/products/999'); assert.equal(notFound.status,404);

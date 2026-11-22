@@ -4,15 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#173f37">
-  <meta name="description" content="Marketuz — o‘zingizga yoqadigan mahsulotlarni kashf eting. O‘zbekiston bo‘ylab xaridlar uchun zamonaviy marketplace sinov versiyasi.">
+  <meta name="description" content="Marketuz — aksessuarlar, kiyim-kechak va uy uchun tanlangan buyumlarni kashf eting.">
   <link rel="preconnect" href="https://images.unsplash.com" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=20261120ornate2">
   <link rel="stylesheet" href="/winter.css?v=20261120ornate3">
+  <link rel="stylesheet" href="/seasonal.css?v=20261122a">
   <title>Marketuz — har kuni ajoyib topilmalar</title>
-  <script src="/app.js?v=20261120ornate2" defer></script>
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/cms-ui.js?v=20261122a" defer></script>
+  <script src="/app.js?v=20261122a" defer></script>
 </head>
 <body>
   <div class="winter-architecture" aria-hidden="true">
@@ -21,7 +24,7 @@
     <img class="winter-lantern winter-lantern-left" src="/assets/decor/gold-lantern.webp" alt="" decoding="async">
     <img class="winter-lantern winter-lantern-right" src="/assets/decor/gold-lantern.webp" alt="" decoding="async">
   </div>
-  <div class="announcement"><span class="announcement-star">✳</span> Marketuz sinov versiyasi <span class="announcement-sep">·</span> Qishki topilmalar va Yangi yil kayfiyati <span class="announcement-star">✳</span></div>
+  <div class="announcement"><span class="announcement-star">✳</span> <span id="announcement-text">Har kuni yangi topilmalar</span> <span class="announcement-star">✳</span></div>
   <header class="site-header" id="site-header">
     <div class="nav-garland" aria-hidden="true"><img src="/assets/decor/pine-garland.webp" alt="" decoding="async"></div>
     <div class="header-main page-pad">
@@ -35,8 +38,8 @@
   </header>
   <main id="app" class="page-pad" tabindex="-1"></main>
   <footer class="footer page-pad">
-    <div class="footer-top"><div class="footer-brand"><a href="/" data-link class="brand brand-light"><span class="brand-sign"><span>m</span><i></i></span><span class="brand-word">market<span>uz</span><small>HAMMASI BIR JOYDA</small></span></a><p>Har kuningizga yangi topilmalar, xaridingizga yangi kayfiyat. Hozir platforma sinov bosqichida.</p></div><div class="footer-col"><strong>Kashf eting</strong><a href="/catalog" data-link>Barcha mahsulotlar</a><a href="/catalog?sort=newest" data-link>Yangi kelganlar</a><a href="/seller" data-link>Sotuvchi markazi</a></div><div class="footer-col"><strong>Yordam</strong><a href="/delivery" data-link>Yetkazib berish</a><a href="/account" data-link>Shaxsiy kabinet</a><a href="/cart" data-link>Savat</a></div><div class="footer-col"><strong>Ma’lumot</strong><a href="/terms" data-link>Foydalanish shartlari</a><a href="/privacy" data-link>Maxfiylik siyosati</a><span>Aloqa ma’lumoti ishga tushirishdan oldin kiritiladi</span></div></div>
-    <div class="footer-bottom"><span>© <span id="year"></span> Marketuz · Sinov versiyasi</span><span>Butun O‘zbekiston uchun yaratilmoqda <span class="footer-flower">✳</span></span></div>
+    <div class="footer-top"><div class="footer-brand"><a href="/" data-link class="brand brand-light"><span class="brand-sign"><span>m</span><i></i></span><span class="brand-word">market<span>uz</span><small>HAMMASI BIR JOYDA</small></span></a><p>Har kuningizga yangi topilmalar, xaridingizga yangi kayfiyat.</p></div><div class="footer-col"><strong>Kashf eting</strong><a href="/catalog" data-link>Barcha mahsulotlar</a><a href="/catalog?sort=newest" data-link>Yangi kelganlar</a><a href="/seller" data-link>Sotuvchi markazi</a></div><div class="footer-col"><strong>Yordam</strong><a href="/delivery" data-link>Yetkazib berish</a><a href="/account" data-link>Shaxsiy kabinet</a><a href="/cart" data-link>Savat</a></div><div class="footer-col"><strong>Ma’lumot</strong><a href="/terms" data-link>Foydalanish shartlari</a><a href="/privacy" data-link>Maxfiylik siyosati</a><span id="footer-contact">Aloqa ma’lumotlari</span></div></div>
+    <div class="footer-bottom"><span>© <span id="year"></span> <span id="footer-name">Marketuz</span></span><span>O‘zbekiston bo‘ylab topilmalar <span class="footer-flower">✳</span></span></div>
   </footer>
   <nav class="bottom-nav" aria-label="Mobil menyu"><a href="/" data-link data-nav="/" aria-label="Bosh sahifa"><span class="icon-slot" data-icon="home"></span><span>Bosh sahifa</span></a><a href="/catalog" data-link data-nav="/catalog" aria-label="Katalog"><span class="icon-slot" data-icon="grid"></span><span>Katalog</span></a><a href="/favorites" data-link data-nav="/favorites" aria-label="Sevimlilar"><span class="icon-slot" data-icon="heart"></span><span>Sevimlilar</span></a><a href="/cart" data-link data-nav="/cart" aria-label="Savat"><span class="bottom-cart-icon"><span class="icon-slot" data-icon="bag"></span><i id="bottom-cart-count"></i></span><span>Savat</span></a><a href="/account" data-link data-nav="/account" aria-label="Profil"><span class="icon-slot" data-icon="user"></span><span>Profil</span></a></nav>
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div><aside id="mobile-drawer" class="drawer" aria-label="Qo‘shimcha menyu" aria-hidden="true"><div class="drawer-heading"><span>Menyu</span><button class="icon-button" data-action="menu-close" aria-label="Menyuni yopish"><span class="icon-slot" data-icon="close"></span></button></div><div class="drawer-feature"><span>Yangi topilmalar har kuni</span><strong>O‘zingizga yoqqanini toping.</strong></div><nav><a href="/" data-link><span class="icon-slot" data-icon="home"></span>Bosh sahifa</a><a href="/catalog" data-link><span class="icon-slot" data-icon="grid"></span>Katalog</a><a href="/seller" data-link><span class="icon-slot" data-icon="store"></span>Sotuvchi markazi</a><a href="/delivery" data-link><span class="icon-slot" data-icon="truck"></span>Yetkazib berish</a><a href="/admin" data-link><span class="icon-slot" data-icon="sliders"></span>Administrator</a><a href="/terms" data-link><span class="icon-slot" data-icon="file"></span>Foydalanish shartlari</a><a href="/privacy" data-link><span class="icon-slot" data-icon="shield"></span>Maxfiylik siyosati</a></nav></aside>
