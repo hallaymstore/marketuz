@@ -31,7 +31,7 @@ await call('/admin/products/'+product.id,{method:'PATCH',cookie:admin,body:{stat
 const found=(await call('/catalog?q=QA%20sinov')).data.products; assert.ok(found.some(x=>String(x.id)===String(product.id)),'approved product visible');
 await call('/favorites/'+product.id,{method:'PUT',cookie:buyer,body:{}});
 const favs=(await call('/favorites',{cookie:buyer})).data.products; assert.ok(favs.some(x=>String(x.id)===String(product.id)),'favorite persisted');
-const order=(await call('/orders',{method:'POST',cookie:buyer,body:{recipient:'QA Xaridor',phone:'+998 90 000 00 00',region:'Qashqadaryo',district:'Kasbi tumani',address:'Sinov ko‘chasi 1, haqiqiy manzil emas',paymentMethod:'cod',items:[{id:product.id,qty:2}]}})).data;
+const order=(await call('/orders',{method:'POST',cookie:buyer,body:{recipient:'QA Xaridor',phone:'+998 90 000 00 00',region:'Qashqadaryo',district:'Kasbi tumani',address:'Sinov ko‘chasi 1, haqiqiy manzil emas',paymentMethod:'cod',agree:true,items:[{id:product.id,qty:2}]}})).data;
 assert.equal(order.subtotal,198000);
 const sellerOrders=(await call('/seller/orders',{cookie:seller})).data.items;
 const item=sellerOrders.find(x=>x.order_id===order.id);assert.ok(item,'seller only order item');

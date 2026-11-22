@@ -101,7 +101,7 @@ app.patch('/api/admin/settings', requireDb, auth, role('admin'), route(async(req
   try { await db.query('BEGIN'); await db.query("INSERT INTO site_settings(key,value,updated_by) VALUES('site',$1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now(),updated_by=excluded.updated_by",[next,req.user.id]); await db.query('INSERT INTO settings_audit(actor_id,old_value,new_value) VALUES($1,$2,$3)',[req.user.id,site,next]); await db.query('COMMIT'); site=next; res.json({site,seasonal:seasonalState(site)}); }
   catch(e){await db.query('ROLLBACK');throw e;} finally{db.release();}
 }));
-app.post('/api/admin/assets', requireDb, auth, role('admin'), route(async(req,res)=>{
+app.post('/api/assets', requireDb, auth, (req,res,next)=>['admin','seller'].includes(req.user.role)?next():next(fail(403,'Rasm yuklash uchun sotuvchi yoki administrator bo‘ling.')), route(async(req,res)=>{
   const data=String(req.body.data||'');
   if(!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(data)) throw fail(400,'PNG, JPEG yoki WebP rasm yuklang.');
   const [,kind,b64]=data.match(/^data:image\/(png|jpeg|webp);base64,(.*)$/);
@@ -247,7 +247,7 @@ app.post('/api/seller/request', requireDb, auth, route(async (req,res) => {
 app.get('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const { rows } = await pool.query('SELECT * FROM products WHERE seller_id=$1 ORDER BY created_at DESC LIMIT 100',[req.user.id]); res.json({ products: rows }); }));
 function productInput(body) {
   const p = { name:text(body.name,180), description:text(body.description,2000), category:text(body.category,40), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock), image:text(body.image,1000), externalLinks:externalLinks(body.externalLinks||[]) };
-  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !imageOk(p.image) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va HTTPS rasm havolasini tekshiring.');
+  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !imageOk(p.image) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmini tekshiring.');
   return p;
 }
 app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const p = productInput(req.body); const { rows } = await pool.query("INSERT INTO products(seller_id,name,description,category,price,old_price,stock,image_url,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending') RETURNING *",[req.user.id,p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.image,JSON.stringify(p.externalLinks)]); res.status(201).json({ product:rows[0] }); }));
