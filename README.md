@@ -10,7 +10,7 @@ Render: Node runtime, build `npm ci`, start `npm start`, health check `/api/heal
 
 ## Boshqaruv
 
-`/admin` sahifasi: sotuvchilar va mahsulotlar moderatsiyasi, platforma mahsulotlarini qo‘shish va tahrirlash, buyurtma holatlari va kuzatuv raqami, brend/nom/logotip/favicon, SEO va ulashish rasmlari, kategoriya/karta rasmlari, bosh sahifa matnlari, 20 ta alohida ikonka, qoidalar va aloqa. Administrator bezak va brend rasmlarini, sotuvchi esa mahsulot rasmini PNG/JPEG/WebP formatida 1.5 MB gacha yuklaydi; fayl PostgreSQL'da saqlanadi. Sozlamalar bazada qoladi, o‘zgarishlar audit jadvaliga yoziladi.
+`/admin` sahifasi: sotuvchilar va mahsulotlar moderatsiyasi, platforma mahsulotlarini qo‘shish va tahrirlash, buyurtma holatlari va kuzatuv raqami, brend/nom/logotip/favicon, SEO va ulashish rasmlari, kategoriya/karta rasmlari, bosh sahifa matnlari hamda banner, katta karta, yetkazish va kirish sahifasi rasmlari, 20 ta alohida ikonka, qoidalar va aloqa. Administrator bezak va brend rasmlarini, sotuvchi esa mahsulot rasmini PNG/JPEG/WebP formatida 1.5 MB gacha yuklaydi; fayl PostgreSQL'da saqlanadi. Sozlamalar bazada qoladi, o‘zgarishlar audit jadvaliga yoziladi.
 
 Mavsum tizimi Toshkent sanasi asosida ishlaydi. Qish 20-noyabrdan boshlanadi. Yangi yil, 8-mart, Navro‘z, Xotira va qadrlash kuni, Mustaqillik, Ustozlar kuni va Konstitutsiya kuni oldindan belgilangan oraliqda ko‘rinadi. Ramazon va Hayitning o‘zgaruvchan sanalari admin paneldan qo‘lda belgilanadi. Har bir bayram uchun sarlavha, izoh, fon, hero va gulchambar alohida sozlanadi. Bahor/yoz/kuz/qish rasmlari va maxsus Navro‘z, Mustaqillik, 8-mart, Ustozlar kuni, Hayit san’ati repoda bor.
 
