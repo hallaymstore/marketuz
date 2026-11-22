@@ -25,7 +25,7 @@ window.MarketuzExperience=(()=>{
     const help=$('market-helper');help.hidden=!site.assistant?.enabled;
     if(site.assistant?.enabled){$('market-helper-icon').src=asset(site.assistant.icon)||'/assets/bag-premium.webp';$('market-helper').setAttribute('aria-label',site.assistant.title||'Yordamchi');$('market-chat-title').textContent=site.assistant.title||'Marketuz yordamchisi';$('market-chat-greeting').textContent=site.assistant.greeting||'';renderBot(activeBot);}
   }
-  function setOpen(open){const panel=$('market-chat'),button=$('market-helper');panel.hidden=!open;button.setAttribute('aria-expanded',String(open));if(open){renderBot(activeBot);$('market-chat-input').focus();}else button.focus();}
+  function setOpen(open){const panel=$('market-chat'),button=$('market-helper');panel.hidden=!open;button.classList.toggle('chat-open',open);button.setAttribute('aria-expanded',String(open));if(open){renderBot(activeBot);$('market-chat-input').focus();}else button.focus();}
   function message(text,kind){const line=document.createElement('div');line.className='market-message '+kind;line.textContent=text;$('market-chat-log').append(line);line.scrollIntoView({block:'nearest'});return line;}
   function renderBot(id){
     const config=site?.assistant;if(!config)return;

@@ -123,6 +123,7 @@ body[data-holiday="ramadan"] .announcement,body[data-holiday="eid"] .announcemen
 /* Draggable assistance and the first-visit tour. */
 .market-helper {position:fixed;right:23px;bottom:27px;z-index:88;display:flex;align-items:center;gap:9px;border:1px solid #ecd59c;border-radius:999px;padding:7px 17px 7px 8px;color:#fff;font-size:.79rem;font-weight:800;cursor:grab;touch-action:none;background:linear-gradient(145deg,#176c59,#0b4038);box-shadow:0 8px 0 #093d34,0 15px 30px #123a3190,0 0 0 5px #fff9e57d}
 .market-helper:active {cursor:grabbing}
+.market-helper.chat-open {display:none}
 .market-helper img {width:38px;height:38px;object-fit:contain;border-radius:50%;background:#fff4d9;padding:5px;pointer-events:none}
 .market-chat {position:fixed;right:24px;bottom:102px;width:min(382px,calc(100vw - 28px));height:min(570px,calc(100dvh - 135px));z-index:110;display:flex;flex-direction:column;border-radius:24px;overflow:hidden;border:1px solid #c3a770;background:#fffcf5 url('/assets/decor/winter-ivory-background.webp') center/cover;box-shadow:0 22px 60px #082b286e}
 .market-chat-head {background:linear-gradient(110deg,#0a3c34,#176756);padding:17px 20px;color:#fff;display:flex;justify-content:space-between;align-items:center}
@@ -167,8 +168,9 @@ body[data-holiday="ramadan"] .announcement,body[data-holiday="eid"] .announcemen
   .promo-banner {padding:4px 37px 4px 9px}
   .promo-banner a{gap:7px}.promo-banner a small{font-size:.53rem}.promo-banner a strong{font-size:.64rem;max-width:47vw}.promo-banner a span{font-size:.58rem}
   .promo-banner>button{right:7px;width:23px;height:23px}
-  .market-helper {bottom:calc(82px + env(safe-area-inset-bottom));right:12px;padding:5px 11px 5px 5px;font-size:.7rem;box-shadow:0 5px 0 #093d34,0 8px 20px #123a3190,0 0 0 3px #fff9e57d}
-  .market-helper img{width:29px;height:29px}
+  .market-helper {bottom:calc(82px + env(safe-area-inset-bottom));right:5px;width:45px;height:45px;justify-content:center;border-radius:50%;padding:4px;font-size:.7rem;box-shadow:0 5px 0 #093d34,0 8px 20px #123a3190,0 0 0 3px #fff9e57d}
+  .market-helper img{width:32px;height:32px}
+  .market-helper span{display:none}
   .market-chat {right:8px;bottom:calc(133px + env(safe-area-inset-bottom));height:min(520px,calc(100dvh - 154px))}
   .detail-art {border-radius:18px;padding:5px}.detail-art::after{inset:7px;border-radius:15px}.detail-art .detail-image{border-radius:14px}
   .detail-copy{padding:22px;border-radius:18px}
