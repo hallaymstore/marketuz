@@ -163,7 +163,7 @@ async function renderStudio(role,kind,id){
   const cats=await api('/subcategories');state.studioSubcategories=cats.subcategories;
   if(kind==='subcategories'){const all=await api('/admin/subcategories');return MarketuzStudio.subcategoryPage(state.config.categories,all.subcategories);}
   const product=id?(await api(role==='seller'?'/seller/products/'+id:'/admin/products/'+id+'/details')).product:null;
-  return MarketuzStudio.editor({role,product,categories:state.config.categories,subcategories:cats.subcategories});
+  return MarketuzStudio.editor({role,product:product||{},categories:state.config.categories,subcategories:cats.subcategories});
 }
 async function loadCart() {
   const entries=state.cart.filter(x=>Number.isSafeInteger(Number(x.id))&&Number(x.qty)>0);
