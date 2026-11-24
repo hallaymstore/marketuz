@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS orders (
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
 ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK(status IN ('awaiting_payment','new','accepted','packing','handed_over','in_transit','delivered','cancelled'));
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_key UUID;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_checkout_key ON orders(buyer_id,checkout_key) WHERE checkout_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders (buyer_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status, created_at DESC);
 CREATE TABLE IF NOT EXISTS order_items (
@@ -140,3 +142,12 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
  UNIQUE(gateway,gateway_id)
 );
 CREATE INDEX IF NOT EXISTS idx_payment_order ON payment_transactions(order_id,gateway);
+CREATE TABLE IF NOT EXISTS shipment_events (
+ id BIGSERIAL PRIMARY KEY, order_id UUID NOT NULL REFERENCES orders(id),
+ source VARCHAR(24) NOT NULL CHECK(source IN ('admin','buyer','uzpost')),
+ status VARCHAR(24) NOT NULL, tracking_number VARCHAR(100),
+ external_id VARCHAR(120), occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(order_id,source,external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_shipment_events_order ON shipment_events(order_id,recorded_at DESC);
