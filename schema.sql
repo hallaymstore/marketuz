@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_seller ON order_items (seller_id, id DESC);
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_reserved BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_id BIGINT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_label VARCHAR(100) NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_order_items_product_order ON order_items(product_id,order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_product ON order_items(order_id,product_id);
 CREATE TABLE IF NOT EXISTS favorites (
@@ -53,6 +55,42 @@ CREATE TABLE IF NOT EXISTS favorites (
 ALTER TABLE products ADD COLUMN IF NOT EXISTS external_links JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS card_background TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS detail_background TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory VARCHAR(80) NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS brand VARCHAR(100) NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS sku VARCHAR(80) NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS specifications JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS gallery JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS variant_count INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS product_subcategories (
+ id BIGSERIAL PRIMARY KEY, category VARCHAR(40) NOT NULL,
+ name VARCHAR(80) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(category,name)
+);
+CREATE INDEX IF NOT EXISTS idx_subcategories_category ON product_subcategories(category,name);
+INSERT INTO product_subcategories(category,name) VALUES
+ ('aksessuar','Sumkalar'),('aksessuar','Taqinchoqlar'),('aksessuar','Soat va ko‘zoynaklar'),
+ ('moda','Ayollar kiyimi'),('moda','Erkaklar kiyimi'),('moda','Poyabzal'),
+ ('elektronika','Telefon aksessuarlari'),('elektronika','Maishiy texnika'),
+ ('uy','Oshxona'),('uy','Dekor'),('uy','Yoritish'),
+ ('gozallik','Parvarish'),('gozallik','Atirlar'),
+ ('bolalar','Kiyimlar'),('bolalar','O‘yinchoqlar'),
+ ('sport','Sport anjomlari'),('sport','Sayohat buyumlari')
+ ON CONFLICT(category,name) DO NOTHING;
+CREATE TABLE IF NOT EXISTS product_variants (
+ id BIGSERIAL PRIMARY KEY, product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+ label VARCHAR(100) NOT NULL, sku VARCHAR(80) NOT NULL DEFAULT '',
+ price INTEGER NOT NULL CHECK(price >= 1000), stock INTEGER NOT NULL DEFAULT 0 CHECK(stock >= 0),
+ image_url TEXT NOT NULL DEFAULT '', active BOOLEAN NOT NULL DEFAULT true,
+ position INTEGER NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants(product_id,active,position,id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_variants_sku ON product_variants(product_id,lower(sku)) WHERE sku<>'' AND active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_products_seller_sku ON products(coalesce(seller_id,0),lower(sku)) WHERE sku<>'' AND status!='archived';
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='order_items_variant_id_fkey') THEN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_variant_id_fkey FOREIGN KEY(variant_id) REFERENCES product_variants(id);
+ END IF;
+END $$;
 DO $$ BEGIN
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='products_stock_mode_check') THEN
   ALTER TABLE products ADD CONSTRAINT products_stock_mode_check CHECK(stock_mode IN ('tracked','replenishable'));

@@ -9,6 +9,7 @@ import { products as samples, featuredSamples, regions } from './seed.js';
 import { defaults, validateSite, seasonalState, assetUrl } from './site-config.js';
 import { mountPayments } from './payment-handlers.js';
 import { buildInterests, rankProducts } from './recommendations.js';
+import { templateWorkbook, parseWorkbook } from './product-import.js';
 
 const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -115,7 +116,7 @@ app.post('/api/assets', requireDb, auth, route(async(req,res)=>{
   await pool.query('INSERT INTO site_assets(id,owner_id,mime,bytes,size_bytes) VALUES($1,$2,$3,$4,$5)',[id,req.user.id,mime,bytes,bytes.length]);
   res.status(201).json({url:'/media/'+id,size:bytes.length});
 }));
-const catalogFields='id,seller_id,name,description,category,price,old_price,stock,stock_mode,restock_days,sold_count,image_url,card_background,detail_background,badge,external_links,created_at';
+const catalogFields='id,seller_id,name,description,category,subcategory,brand,price,old_price,stock,stock_mode,restock_days,sold_count,image_url,card_background,detail_background,badge,external_links,variant_count,created_at';
 const feedSort={ newest:{order:'id DESC',key:'id'}, price_asc:{order:'price ASC,id DESC',key:'price'},price_desc:{order:'price DESC,id DESC',key:'price'},popular:{order:'sold_count DESC,id DESC',key:'sold_count'} };
 const encodeCursor=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
 const decodeCursor=(value,sort,q,category)=>{
@@ -165,7 +166,9 @@ app.get('/api/products/:id', route(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) throw fail(404, 'Mahsulot topilmadi.');
   if (demoOnly) { const product = inMemoryCatalog.find(p => p.id === Number(req.params.id)); if (!product) throw fail(404, 'Mahsulot topilmadi.'); return res.json({ product }); }
   const { rows } = await pool.query("SELECT p.*,u.full_name AS seller_name,u.avatar_url AS seller_avatar FROM products p LEFT JOIN users u ON p.seller_id=u.id WHERE p.id=$1 AND p.status='active'", [req.params.id]);
-  if (!rows[0]) throw fail(404, 'Mahsulot topilmadi.'); res.json({ product: rows[0] });
+  if (!rows[0]) throw fail(404, 'Mahsulot topilmadi.');
+  rows[0].variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active=true ORDER BY position,id',[req.params.id])).rows;
+  res.json({ product: rows[0] });
 }));
 app.get('/api/recommendations',route(async(req,res)=>{
   const contextId=/^\d+$/.test(String(req.query.productId||''))?String(req.query.productId):null;
@@ -308,22 +311,32 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
   const method=text(body.paymentMethod,20);
   if(method!=='cod' && !(['click','payme'].includes(method) && paymentReady(method))) throw fail(400,'Tanlangan to‘lov usuli hozir faol emas.');
   if (!Array.isArray(body.items) || !body.items.length || body.items.length > 30) throw fail(400, 'Savat bo‘sh yoki juda katta.');
-  const items = body.items.map(x => ({ id: Number(x.id), qty: Number(x.qty) }));
-  if (items.some(x => !Number.isSafeInteger(x.id) || x.id < 1 || !Number.isSafeInteger(x.qty) || x.qty < 1 || x.qty > 20) || new Set(items.map(x => x.id)).size !== items.length) throw fail(400, 'Savat ma’lumotlari xato.');
+  const items = body.items.map(x => ({ id: Number(x.id), variantId:x.variantId?Number(x.variantId):null, qty: Number(x.qty) }));
+  if (items.some(x => !Number.isSafeInteger(x.id) || x.id < 1 || !Number.isSafeInteger(x.qty) || x.qty < 1 || x.qty > 20 || (x.variantId!==null&&(!Number.isSafeInteger(x.variantId)||x.variantId<1))) || new Set(items.map(x => `${x.id}:${x.variantId||''}`)).size !== items.length) throw fail(400, 'Savat ma’lumotlari xato.');
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    const ids = items.map(x => x.id).sort((a,b) => a-b);
-    const locked = await db.query('SELECT id,name,price,stock,stock_mode,image_url,seller_id FROM products WHERE id=ANY($1::bigint[]) AND status=$2 ORDER BY id FOR UPDATE', [ids,'active']);
+    const ids = [...new Set(items.map(x=>x.id))].sort((a,b) => a-b);
+    const locked = await db.query('SELECT id,name,price,stock,stock_mode,image_url,seller_id,variant_count FROM products WHERE id=ANY($1::bigint[]) AND status=$2 ORDER BY id FOR UPDATE', [ids,'active']);
     if (locked.rows.length !== ids.length) throw fail(409, 'Savatdagi ayrim mahsulotlar endi mavjud emas.');
     let subtotal = 0; const detailed = [];
-    for (const p of locked.rows) { const qty = items.find(i => i.id === Number(p.id)).qty; if (p.stock_mode!=='replenishable' && p.stock < qty) throw fail(409, `${p.name}: ombordagi miqdor yetarli emas.`); subtotal += p.price * qty; if(subtotal>2_000_000_000) throw fail(400,'Buyurtma summasi limitdan oshdi.'); detailed.push({ ...p, qty }); }
+    const variantIds=items.map(i=>i.variantId).filter(Boolean).sort((a,b)=>a-b);
+    const variants=variantIds.length?(await db.query('SELECT id,product_id,label,price,stock,image_url FROM product_variants WHERE id=ANY($1::bigint[]) AND active=true ORDER BY id FOR UPDATE',[variantIds])).rows:[];
+    for (const item of items) {
+      const p=locked.rows.find(x=>Number(x.id)===item.id),v=item.variantId?variants.find(x=>Number(x.id)===item.variantId):null;
+      if((p.variant_count>0 && (!v || Number(v.product_id)!==item.id)) || (p.variant_count===0 && item.variantId))throw fail(409,`${p.name}: variantni qayta tanlang.`);
+      if(p.stock_mode!=='replenishable' && (v?v.stock:p.stock)<item.qty)throw fail(409,`${p.name}: ombordagi miqdor yetarli emas.`);
+      const price=v?v.price:p.price;subtotal+=price*item.qty;
+      if(subtotal>2_000_000_000) throw fail(400,'Buyurtma summasi limitdan oshdi.');
+      detailed.push({...p,qty:item.qty,variantId:v?.id||null,variantLabel:v?.label||'',price,image_url:v?.image_url||p.image_url});
+    }
     if(method!=='cod' && detailed.some(p=>p.stock_mode==='replenishable')) throw fail(409,'Buyurtma asosida keladigan mahsulot uchun to‘lov operator tasdiqlaganidan keyin kelishiladi. Yetkazilganda to‘lovni tanlang.');
     const id = randomUUID();
     await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,total,status,payment_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending']);
     for (const p of detailed) {
       await db.query("UPDATE products SET stock=CASE WHEN stock_mode='tracked' THEN stock-$1 ELSE stock END,sold_count=sold_count+$1,updated_at=now() WHERE id=$2", [p.qty,p.id]);
-      await db.query('INSERT INTO order_items(order_id,product_id,seller_id,title,image_url,price,quantity,stock_reserved) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [id,p.id,p.seller_id,p.name,p.image_url,p.price,p.qty,p.stock_mode==='tracked']);
+      if(p.variantId&&p.stock_mode==='tracked')await db.query('UPDATE product_variants SET stock=stock-$1,updated_at=now() WHERE id=$2',[p.qty,p.variantId]);
+      await db.query('INSERT INTO order_items(order_id,product_id,seller_id,title,image_url,price,quantity,stock_reserved,variant_id,variant_label) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [id,p.id,p.seller_id,p.name,p.image_url,p.price,p.qty,p.stock_mode==='tracked',p.variantId,p.variantLabel]);
     }
     await db.query('COMMIT'); res.status(201).json({ id, subtotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:paymentUrl(method,id,subtotal), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. To‘lovni provayder sahifasida yakunlang.' });
   } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
@@ -341,7 +354,7 @@ app.get('/api/orders/:id/payment-link', requireDb, auth, route(async(req,res)=>{
 }));
 async function cancelOrder(id, buyerId) {
   const db = await pool.connect();
-  try { await db.query('BEGIN'); const { rows } = await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id]); const o = rows[0]; if (!o || (buyerId && String(o.buyer_id) !== String(buyerId))) throw fail(404,'Buyurtma topilmadi.'); if (!['awaiting_payment','new','accepted','packing'].includes(o.status) || o.payment_status==='paid') throw fail(409,'Bu buyurtmani bekor qilib bo‘lmaydi.'); const reserved=await db.query('SELECT id FROM payment_transactions WHERE order_id=$1 AND state=1 LIMIT 1',[id]); if(reserved.rowCount) throw fail(409,'To‘lov jarayonda. Yakunlanishini kuting.'); await db.query("UPDATE orders SET status='cancelled',updated_at=now() WHERE id=$1",[id]); const items = await db.query('SELECT product_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[id]); for(const x of items.rows) await db.query('UPDATE products SET stock=stock+$1,sold_count=GREATEST(0,sold_count-$2) WHERE id=$3',[x.stock_reserved?x.quantity:0,x.quantity,x.product_id]); await db.query('COMMIT'); return o; } catch(e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
+  try { await db.query('BEGIN'); const { rows } = await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id]); const o = rows[0]; if (!o || (buyerId && String(o.buyer_id) !== String(buyerId))) throw fail(404,'Buyurtma topilmadi.'); if (!['awaiting_payment','new','accepted','packing'].includes(o.status) || o.payment_status==='paid') throw fail(409,'Bu buyurtmani bekor qilib bo‘lmaydi.'); const reserved=await db.query('SELECT id FROM payment_transactions WHERE order_id=$1 AND state=1 LIMIT 1',[id]); if(reserved.rowCount) throw fail(409,'To‘lov jarayonda. Yakunlanishini kuting.'); await db.query("UPDATE orders SET status='cancelled',updated_at=now() WHERE id=$1",[id]); const items = await db.query('SELECT product_id,variant_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[id]); for(const x of items.rows){if(x.variant_id&&x.stock_reserved)await db.query('UPDATE product_variants SET stock=stock+$1 WHERE id=$2',[x.quantity,x.variant_id]);await db.query('UPDATE products p SET stock=CASE WHEN p.variant_count>0 THEN (SELECT coalesce(sum(v.stock),0) FROM product_variants v WHERE v.product_id=p.id AND v.active) WHEN $4::bigint IS NULL AND $1::int>0 THEN p.stock+$1 ELSE p.stock END,sold_count=GREATEST(0,sold_count-$2) WHERE p.id=$3',[x.stock_reserved?x.quantity:0,x.quantity,x.product_id,x.variant_id]);} await db.query('COMMIT'); return o; } catch(e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
 }
 app.post('/api/orders/:id/cancel', requireDb, auth, route(async (req,res) => { await cancelOrder(req.params.id,req.user.id); res.json({ ok:true }); }));
 
@@ -352,12 +365,52 @@ app.post('/api/seller/request', requireDb, auth, route(async (req,res) => {
 }));
 app.get('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const cursor=/^\d+$/.test(String(req.query.cursor||''))?Number(req.query.cursor):null;const { rows } = await pool.query(`SELECT * FROM products WHERE seller_id=$1 ${cursor?'AND id<$2':''} ORDER BY id DESC LIMIT 51`,cursor?[req.user.id,cursor]:[req.user.id]);res.json({products:rows.slice(0,50),nextCursor:rows.length>50?String(rows[49].id):null}); }));
 function productInput(body) {
-  const p = { name:text(body.name,180), description:text(body.description,2000), category:text(body.category,40), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock),stockMode:text(body.stockMode||'tracked',20),restockDays:Number(body.restockDays||7), image:text(body.image,1000), cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]) };
-  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !['tracked','replenishable'].includes(p.stockMode) || !Number.isSafeInteger(p.restockDays) || p.restockDays<1 || p.restockDays>90 || !imageOk(p.image) || (p.cardBackground&&!imageOk(p.cardBackground)) || (p.detailBackground&&!imageOk(p.detailBackground)) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmlarini tekshiring.');
+  const specs=body.specifications??{}, gallery=body.gallery??[], variants=body.variants??[];
+  if(!specs || Array.isArray(specs) || typeof specs!=='object' || Object.keys(specs).length>24 || !Array.isArray(gallery) || gallery.length>12 || !Array.isArray(variants) || variants.length>30) throw fail(400,'Rasm, xususiyat yoki variantlar soni juda katta.');
+  const p = { name:text(body.name,180), description:text(body.description,4000), category:text(body.category,40),subcategory:text(body.subcategory,80),brand:text(body.brand,100),sku:text(body.sku,80), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock),stockMode:text(body.stockMode||'tracked',20),restockDays:Number(body.restockDays||7), image:text(body.image,1000)||'/assets/product-placeholder.svg', cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]),gallery:gallery.map(x=>text(x,1000)),specifications:Object.fromEntries(Object.entries(specs).map(([k,v])=>[text(k,70),text(v,200)])),variants:variants.map(v=>({id:v.id?Number(v.id):null,label:text(v.label,100),sku:text(v.sku,80),price:Number(v.price),stock:Number(v.stock),image:text(v.image,1000)})) };
+  if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !['tracked','replenishable'].includes(p.stockMode) || !Number.isSafeInteger(p.restockDays) || p.restockDays<1 || p.restockDays>90 || !imageOk(p.image) || (p.cardBackground&&!imageOk(p.cardBackground)) || (p.detailBackground&&!imageOk(p.detailBackground)) || !Number.isSafeInteger(p.oldPrice) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmlarini tekshiring.');
+  if(p.gallery.some(x=>!imageOk(x)) || Object.entries(p.specifications).some(([k,v])=>!k||!v) || p.variants.some(v=>(v.id!==null&&(!Number.isSafeInteger(v.id)||v.id<1))||!v.label||!Number.isSafeInteger(v.price)||v.price<1000||v.price>1e9||!Number.isSafeInteger(v.stock)||v.stock<0||v.stock>100000||(v.image&&!imageOk(v.image)))) throw fail(400,'Galereya, xususiyat yoki variantlarni tekshiring.');
+  if(new Set(p.variants.filter(v=>v.id).map(v=>v.id)).size!==p.variants.filter(v=>v.id).length || new Set(p.variants.filter(v=>v.sku).map(v=>v.sku.toLowerCase())).size!==p.variants.filter(v=>v.sku).length) throw fail(400,'Variant ID yoki SKU takrorlangan.');
   return p;
 }
-app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const p = productInput(req.body); const { rows } = await pool.query("INSERT INTO products(seller_id,name,description,category,price,old_price,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending') RETURNING *",[req.user.id,p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks)]); res.status(201).json({ product:rows[0] }); }));
-app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const p=productInput(req.body); const { rows }=await pool.query("UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,stock_mode=$7,restock_days=$8,image_url=$9,card_background=$10,detail_background=$11,external_links=$12,status='pending',updated_at=now() WHERE id=$13 AND seller_id=$14 AND status!='archived' RETURNING *",[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
+async function checkSubcategory(db,p){
+  if(!p.subcategory)return;
+  const found=await db.query('SELECT 1 FROM product_subcategories WHERE category=$1 AND name=$2',[p.category,p.subcategory]);
+  if(!found.rowCount)throw fail(400,'Quyi kategoriya tanlangan kategoriyaga mos emas.');
+}
+async function saveProduct(db,p,{id=null,sellerId=null,status='pending'}={}){
+  await checkSubcategory(db,p);
+  const values=[p.name,p.description,p.category,p.subcategory,p.brand,p.sku,p.price,p.oldPrice||null,p.variants.length?0:p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),JSON.stringify(p.gallery),JSON.stringify(p.specifications),status];
+  let product;
+  if(id){
+    const existing=(await db.query('SELECT id,seller_id,status FROM products WHERE id=$1 FOR UPDATE',[id])).rows[0];
+    if(!existing || (sellerId!==null && String(existing.seller_id)!==String(sellerId)) || (sellerId!==null&&existing.status==='archived'))throw fail(404,'Mahsulot topilmadi.');
+    product=(await db.query(`UPDATE products SET name=$1,description=$2,category=$3,subcategory=$4,brand=$5,sku=$6,price=$7,old_price=$8,stock=$9,stock_mode=$10,restock_days=$11,image_url=$12,card_background=$13,detail_background=$14,external_links=$15,gallery=$16,specifications=$17,status=$18,updated_at=now() WHERE id=$19 RETURNING *`,[...values,id])).rows[0];
+  }else{
+    product=(await db.query(`INSERT INTO products(seller_id,name,description,category,subcategory,brand,sku,price,old_price,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,gallery,specifications,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,[sellerId,...values])).rows[0];
+  }
+  const keep=p.variants.filter(v=>v.id).map(v=>v.id);
+  await db.query('UPDATE product_variants SET active=false WHERE product_id=$1 AND active=true AND NOT(id=ANY($2::bigint[]))',[product.id,keep]);
+  for(const [position,v] of p.variants.entries()){
+    if(v.id){const result=await db.query('UPDATE product_variants SET label=$1,sku=$2,price=$3,stock=$4,image_url=$5,active=true,position=$6,updated_at=now() WHERE id=$7 AND product_id=$8 RETURNING id',[v.label,v.sku,v.price,v.stock,v.image,position,v.id,product.id]);if(!result.rowCount)throw fail(400,'Variant ushbu mahsulotga tegishli emas.');}
+    else await db.query('INSERT INTO product_variants(product_id,label,sku,price,stock,image_url,position) VALUES($1,$2,$3,$4,$5,$6,$7)',[product.id,v.label,v.sku,v.price,v.stock,v.image,position]);
+  }
+  if(p.variants.length)product=(await db.query('UPDATE products SET stock=(SELECT coalesce(sum(stock),0) FROM product_variants WHERE product_id=$1 AND active),price=(SELECT min(price) FROM product_variants WHERE product_id=$1 AND active),variant_count=$2 WHERE id=$1 RETURNING *',[product.id,p.variants.length])).rows[0];
+  else product=(await db.query('UPDATE products SET variant_count=0 WHERE id=$1 RETURNING *',[product.id])).rows[0];
+  return product;
+}
+async function saveProductRequest(req,{id=null,sellerId=null,status='pending'}={}){
+  const p=productInput(req.body),db=await pool.connect();
+  try {await db.query('BEGIN');const product=await saveProduct(db,p,{id,sellerId,status});await db.query('COMMIT');return product;}
+  catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
+}
+app.get('/api/subcategories',route(async(req,res)=>{if(demoOnly)return res.json({subcategories:[]});const {rows}=await pool.query('SELECT id,category,name FROM product_subcategories WHERE category=ANY($1::text[]) ORDER BY category,name',[site.categories.map(c=>c.id)]);res.json({subcategories:rows});}));
+app.get('/api/admin/subcategories', requireDb, auth, role('admin'),route(async(req,res)=>{const {rows}=await pool.query('SELECT id,category,name FROM product_subcategories ORDER BY category,name');res.json({subcategories:rows});}));
+app.post('/api/admin/subcategories', requireDb, auth, role('admin'),route(async(req,res)=>{const category=text(req.body.category,40),name=text(req.body.name,80);if(!site.categories.some(x=>x.id===category)||name.length<2)throw fail(400,'Kategoriya va quyi kategoriya nomini tekshiring.');const {rows}=await pool.query('INSERT INTO product_subcategories(category,name) VALUES($1,$2) ON CONFLICT(category,name) DO UPDATE SET name=excluded.name RETURNING *',[category,name]);res.status(201).json({subcategory:rows[0]});}));
+app.delete('/api/admin/subcategories/:id', requireDb, auth, role('admin'),route(async(req,res)=>{const row=(await pool.query('SELECT category,name FROM product_subcategories WHERE id=$1',[req.params.id])).rows[0];if(!row)throw fail(404,'Quyi kategoriya topilmadi.');const used=await pool.query("SELECT 1 FROM products WHERE category=$1 AND subcategory=$2 AND status!='archived' LIMIT 1",[row.category,row.name]);if(used.rowCount)throw fail(409,'Bu quyi kategoriyada mahsulotlar bor.');await pool.query('DELETE FROM product_subcategories WHERE id=$1',[req.params.id]);res.json({ok:true});}));
+app.get('/api/seller/products/:id',requireDb,auth,role('seller'),route(async(req,res)=>{const product=(await pool.query("SELECT * FROM products WHERE id=$1 AND seller_id=$2",[req.params.id,req.user.id])).rows[0];if(!product)throw fail(404,'Mahsulot topilmadi.');product.variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active ORDER BY position,id',[product.id])).rows;res.json({product});}));
+app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const product=await saveProductRequest(req,{sellerId:req.user.id});res.status(201).json({product}); }));
+app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const product=await saveProductRequest(req,{id:req.params.id,sellerId:req.user.id});res.json({product}); }));
 app.delete('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const result=await pool.query("UPDATE products SET status='archived',updated_at=now() WHERE id=$1 AND seller_id=$2 RETURNING id",[req.params.id,req.user.id]); if(!result.rowCount) throw fail(404,'Mahsulot topilmadi.'); res.json({ok:true}); }));
 app.get('/api/seller/orders', requireDb, auth, role('seller'), route(async (req,res) => { const { rows }=await pool.query('SELECT i.*,o.status AS order_status,o.created_at,o.region,o.district,o.recipient,o.phone FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.seller_id=$1 ORDER BY o.created_at DESC LIMIT 100',[req.user.id]); res.json({items:rows}); }));
 app.patch('/api/seller/order-items/:id', requireDb, auth, role('seller'), route(async (req,res) => { const status=text(req.body.status,20); if(!['packing','ready'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE order_items i SET fulfillment_status=$1 FROM orders o WHERE i.id=$2 AND i.seller_id=$3 AND i.order_id=o.id AND o.status NOT IN ('awaiting_payment','cancelled','delivered') RETURNING i.*",[status,req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Buyurtma topilmadi.'); res.json({item:rows[0]}); }));
@@ -366,18 +419,40 @@ app.get('/api/admin/overview', requireDb, auth, role('admin'), route(async (req,
 app.get('/api/admin/sellers', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT id,full_name,email,phone,role,seller_status,created_at FROM users WHERE seller_status IN ('pending','approved','rejected') ORDER BY created_at DESC LIMIT 100"); res.json({sellers:rows}); }));
 app.patch('/api/admin/sellers/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['approved','rejected'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE users SET seller_status=$1,role=CASE WHEN $3 THEN 'seller' ELSE 'buyer' END WHERE id=$2 AND role!='admin' RETURNING id,full_name,email,seller_status",[status,req.params.id,status==='approved']); if(!rows[0]) throw fail(404,'Sotuvchi topilmadi.'); res.json({seller:rows[0]}); }));
 app.get('/api/admin/products', requireDb, auth, role('admin'), route(async (req,res) => { const cursor=decodeCursor(req.query.cursor,'admin','','');let where='';const params=[];if(cursor){params.push(cursor[3],cursor[4]);where="WHERE (CASE WHEN p.status='pending' THEN 0 ELSE 1 END)>$1 OR ((CASE WHEN p.status='pending' THEN 0 ELSE 1 END)=$1 AND p.id<$2)";}const {rows}=await pool.query(`SELECT p.*,u.full_name AS seller_name FROM products p LEFT JOIN users u ON u.id=p.seller_id ${where} ORDER BY CASE WHEN p.status='pending' THEN 0 ELSE 1 END,p.id DESC LIMIT 51`,params);const products=rows.slice(0,50),last=products.at(-1);res.json({products,nextCursor:rows.length>50?encodeCursor(['admin','','',last.status==='pending'?0:1,Number(last.id)]):null}); }));
+app.get('/api/admin/products/:id/details', requireDb,auth,role('admin'),route(async(req,res)=>{const product=(await pool.query('SELECT * FROM products WHERE id=$1',[req.params.id])).rows[0];if(!product)throw fail(404,'Mahsulot topilmadi.');product.variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active ORDER BY position,id',[product.id])).rows;res.json({product});}));
 app.post('/api/admin/products', requireDb, auth, role('admin'), route(async(req,res)=>{
-  const p=productInput(req.body),status=text(req.body.status,20);
+  const status=text(req.body.status,20);
   if(!['active','pending'].includes(status)) throw fail(400,'Yangi mahsulot holati xato.');
-  const {rows}=await pool.query('INSERT INTO products(name,description,category,price,old_price,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status]);
-  res.status(201).json({product:rows[0]});
+  const product=await saveProductRequest(req,{status});res.status(201).json({product});
 }));
 app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,req.params.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
 app.patch('/api/admin/products/:id/details', requireDb, auth, role('admin'), route(async(req,res)=>{
-  const p=productInput(req.body), status=text(req.body.status,20);
+  const status=text(req.body.status,20);
   if(!['active','pending','rejected','archived'].includes(status)) throw fail(400,'Mahsulot holati xato.');
-  const {rows}=await pool.query('UPDATE products SET name=$1,description=$2,category=$3,price=$4,old_price=$5,stock=$6,stock_mode=$7,restock_days=$8,image_url=$9,card_background=$10,detail_background=$11,external_links=$12,status=$13,updated_at=now() WHERE id=$14 RETURNING *',[p.name,p.description,p.category,p.price,p.oldPrice||null,p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),status,req.params.id]);
-  if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]});
+  const product=await saveProductRequest(req,{id:req.params.id,status});res.json({product});
+}));
+const manageProducts=(req,res,next)=>['admin','seller'].includes(req.user?.role)?next():next(fail(403,'Mahsulotlarni boshqarish uchun ruxsat yo‘q.'));
+app.get('/api/catalog-tools/template.xlsx',requireDb,auth,manageProducts,route(async(req,res)=>{res.set('Cache-Control','no-store').set('Content-Disposition','attachment; filename="marketuz-mahsulotlar.xlsx"').type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(await templateWorkbook());}));
+async function readProductWorkbook(req){
+  const data=req.body?.data;
+  if(typeof data!=='string'||data.length>1_650_000||!/^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data))throw fail(400,'Excel fayl formati xato.');
+  let rows;try{rows=await parseWorkbook(Buffer.from(data,'base64'));}catch(e){throw fail(400,e.message||'Excel faylni o‘qib bo‘lmadi.');}
+  const parsed=rows.map(p=>productInput(p));
+  for(const p of parsed)await checkSubcategory(pool,p);
+  return parsed;
+}
+app.post('/api/products/import/preview',requireDb,auth,manageProducts,route(async(req,res)=>{const products=await readProductWorkbook(req);res.json({count:products.length,variants:products.reduce((n,p)=>n+p.variants.length,0),products:products.map(p=>({sku:p.sku,name:p.name,category:p.category,subcategory:p.subcategory,price:p.price,variants:p.variants.length,image:p.image}))});}));
+app.post('/api/products/import/commit',requireDb,auth,manageProducts,route(async(req,res)=>{
+  const products=await readProductWorkbook(req),db=await pool.connect();
+  try{
+    await db.query('BEGIN');
+    for(const p of products){
+      const duplicate=await db.query("SELECT id FROM products WHERE coalesce(seller_id,0)=$1 AND lower(sku)=lower($2) AND status!='archived' LIMIT 1",[req.user.role==='seller'?req.user.id:0,p.sku]);
+      if(duplicate.rowCount)throw fail(409,`${p.sku} SKU allaqachon mavjud. Import bekor qilindi.`);
+      await saveProduct(db,p,{sellerId:req.user.role==='seller'?req.user.id:null,status:'pending'});
+    }
+    await db.query('COMMIT');res.status(201).json({count:products.length,message:`${products.length} ta mahsulot tekshiruv ro‘yxatiga qo‘shildi.`});
+  }catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
 }));
 app.get('/api/admin/orders', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query('SELECT o.*,u.email AS buyer_email FROM orders o JOIN users u ON u.id=o.buyer_id ORDER BY o.created_at DESC LIMIT 100'); res.json({orders:rows}); }));
 app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,24), tracking=text(req.body.trackingNumber,100); if(!['accepted','packing','handed_over','in_transit','delivered','cancelled'].includes(status)) throw fail(400,'Status xato.'); if(status==='cancelled') { await cancelOrder(req.params.id,null); return res.json({ok:true}); } const {rows}=await pool.query("UPDATE orders SET status=$1,tracking_number=$2,updated_at=now() WHERE id=$3 AND status NOT IN ('cancelled','awaiting_payment') RETURNING *",[status,tracking||null,req.params.id]); if(!rows[0]) throw fail(409,'Buyurtma topilmadi yoki to‘lov kutilmoqda.'); res.json({order:rows[0]}); }));

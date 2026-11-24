@@ -13,8 +13,11 @@ export function clickSignature(body,secret,complete=false){
 }
 async function releaseOrder(db,orderId,paid=false){
   await db.query("UPDATE orders SET status='cancelled',payment_status=$2,updated_at=now() WHERE id=$1 AND status!='cancelled'",[orderId,paid?'refunded':'cancelled']);
-  const items=await db.query('SELECT product_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[orderId]);
-  for(const p of items.rows) await db.query('UPDATE products SET stock=stock+$1,sold_count=GREATEST(0,sold_count-$2) WHERE id=$3',[p.stock_reserved?p.quantity:0,p.quantity,p.product_id]);
+  const items=await db.query('SELECT product_id,variant_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[orderId]);
+  for(const p of items.rows){
+    if(p.variant_id&&p.stock_reserved)await db.query('UPDATE product_variants SET stock=stock+$1 WHERE id=$2',[p.quantity,p.variant_id]);
+    await db.query('UPDATE products p SET stock=CASE WHEN p.variant_count>0 THEN (SELECT coalesce(sum(v.stock),0) FROM product_variants v WHERE v.product_id=p.id AND v.active) WHEN $4::bigint IS NULL AND $1::int>0 THEN p.stock+$1 ELSE p.stock END,sold_count=GREATEST(0,sold_count-$2) WHERE p.id=$3',[p.stock_reserved?p.quantity:0,p.quantity,p.product_id,p.variant_id]);
+  }
 }
 export function mountPayments(app,pool,ready){
   app.post('/api/payments/payme',async(req,res)=>{
