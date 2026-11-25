@@ -243,5 +243,74 @@ test('Admin security, TOTP 2FA flow, and OTP brute-force lockout', async () => {
     }
     const lockedOut = await req('/auth/phone/register', { method: 'POST', body: { name: 'Brute Test', phone: brutePhone, code: realBruteCode, password: pass1, agree: true } });
     assert.equal(lockedOut.status, 429);
+
+    // 3. Mock SMS dev-inbox is strictly 404 when SMS_MOCK is not 'true'
+    assert.equal((await req('/auth/phone/dev-inbox')).status, 404);
+    assert.equal((await req('/config')).data.mockSms, false);
   });
+});
+
+test('Mock SMS dev-inbox works in non-production when SMS_MOCK=true and is strictly disabled in production', async () => {
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevSmsMock = process.env.SMS_MOCK;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.SMS_MOCK = 'true';
+    assert.equal(isMockSmsAllowed(), false);
+
+    process.env.NODE_ENV = 'test';
+    process.env.SMS_MOCK = 'true';
+    assert.equal(isMockSmsAllowed(), true);
+
+    process.env.DATABASE_URL = TEST_DB_URL;
+    process.env.SESSION_SECRET = 'test-session-secret-at-least-32-chars-long-001';
+    process.env.OTP_SECRET = 'test-otp-secret-at-least-32-chars-long-002';
+    process.env.SMS_ENABLED = 'false';
+
+    const { app, pool, initialize } = createApp();
+    await initialize();
+    const adminPool = new pg.Pool({ connectionString: TEST_DB_URL });
+    await adminPool.query('TRUNCATE TABLE sms_requests, phone_otps, user_sessions, users RESTART IDENTITY CASCADE');
+    const server = await new Promise(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    try {
+      const cfg = await (await fetch(base + '/config')).json();
+      assert.equal(cfg.smsEnabled, true);
+      assert.equal(cfg.mockSms, true);
+
+      const phone = '+998 90 555 12 34';
+      const sendRes = await fetch(base + '/auth/phone/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, purpose: 'register' })
+      });
+      assert.equal(sendRes.status, 200);
+
+      const inbox = await (await fetch(base + '/auth/phone/dev-inbox?phone=' + encodeURIComponent(phone))).json();
+      assert.ok(inbox.messages.length >= 1);
+      assert.match(inbox.messages[0].code, /^\d{6}$/);
+
+      const regRes = await fetch(base + '/auth/phone/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Mock Sms User',
+          phone,
+          code: inbox.messages[0].code,
+          password: 'SecureBuyerPass!2026',
+          agree: true
+        })
+      });
+      assert.equal(regRes.status, 201);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      await pool?.end();
+      await adminPool.end();
+    }
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevSmsMock === undefined) delete process.env.SMS_MOCK; else process.env.SMS_MOCK = prevSmsMock;
+  }
 });

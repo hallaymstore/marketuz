@@ -8,6 +8,9 @@ const compare=(a,b)=>{
   const x=Buffer.from(a),y=Buffer.from(b);
   return x.length===y.length&&timingSafeEqual(x,y);
 };
+export function isClickSandboxAllowed() {
+  return process.env.NODE_ENV !== 'production' && process.env.CLICK_SANDBOX_MOCK === 'true';
+}
 export function clickSignature(body,secret,complete=false){
   return createHash('md5').update([body.click_trans_id,body.service_id,secret,body.merchant_trans_id,...(complete?[body.merchant_prepare_id]:[]),body.amount,body.action,body.sign_time].join('')).digest('hex');
 }
@@ -122,5 +125,61 @@ export function mountPayments(app,pool,ready){
       await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1",[o.id]);
       return await done(0,'Success',{merchant_confirm_id:t.id});
     }catch(e){try{await db.query('ROLLBACK');}catch{}console.error('Click callback:',e.message);return out(-8,'Error in request from click');}finally{db.release();}
+  });
+
+  // Non-production Click Sandbox hosted window (strictly disabled in production)
+  const escHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  if (typeof app.get === 'function') {
+    app.get('/api/payments/click/sandbox-pay', async (req, res) => {
+    if (!isClickSandboxAllowed()) return res.status(404).json({ error: 'Topilmadi.' });
+    const orderId = String(req.query.orderId || '');
+    if (!idOk(orderId)) return res.status(404).send('Buyurtma topilmadi.');
+    const { rows } = await pool.query('SELECT id, total, status, payment_method, payment_status FROM orders WHERE id=$1', [orderId]);
+    const o = rows[0];
+    if (!o || o.payment_method !== 'click') return res.status(404).send('Buyurtma topilmadi.');
+    if (o.payment_status === 'paid' || o.status !== 'awaiting_payment') return res.redirect(303, '/pay/' + o.id);
+    res.type('html').send(`<!doctype html><html lang="uz"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Click Sandbox To‘lov</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/payment.css"></head><body class="page-pad"><main class="payment-page"><div class="payment-panel"><span class="eyebrow">CLICK SANDBOX · SINOV OYNASI</span><h2>${escHtml(new Intl.NumberFormat('uz-UZ').format(o.total))} so‘m</h2><p>Bu sinov muhiti uchun Click to‘lov oynasi simulyatsiyasi. Haqiqiy karta yechilmaydi; tasdiqlash serverdagi Click callback holatini sinovdan o‘tkazadi.</p><form method="POST" action="/api/payments/click/sandbox-pay" class="form-grid"><input type="hidden" name="orderId" value="${escHtml(o.id)}"><label class="field full">Sinov karta raqami (Uzcard / Humo)<input name="testCard" value="8600 0000 0000 0001" maxlength="19" required></label><label class="field">Amal muddati<input name="testExpiry" value="12/28" maxlength="5" required></label><label class="field">Tasdiq<input value="Bir martalik to‘lov" disabled></label><button class="btn btn-primary full" type="submit" name="decision" value="pay">To‘lovni tasdiqlash →</button><button class="btn btn-outline full" type="submit" name="decision" value="cancel">Bekor qilish</button></form></div></main></body></html>`);
+    });
+  }
+
+  app.post('/api/payments/click/sandbox-pay', async (req, res) => {
+    if (!isClickSandboxAllowed()) return res.status(404).json({ error: 'Topilmadi.' });
+    const orderId = String(req.body?.orderId || '');
+    const decision = req.body?.decision === 'cancel' ? 'cancel' : 'pay';
+    if (!idOk(orderId)) return res.status(404).send('Buyurtma topilmadi.');
+    const db = await pool.connect();
+    try {
+      await db.query('BEGIN');
+      const o = (await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [orderId])).rows[0];
+      if (!o || o.payment_method !== 'click') {
+        await db.query('ROLLBACK');
+        return res.status(404).send('Buyurtma topilmadi.');
+      }
+      let resultStatus = o.status, resultPayStatus = o.payment_status;
+      if (o.status === 'awaiting_payment') {
+        if (decision === 'pay') {
+          const tx = (await db.query("INSERT INTO payment_transactions(gateway,gateway_id,order_id,amount,state,create_time,perform_time) VALUES('click',$1,$2,$3,2,$4,$4) RETURNING id", ['sandbox-' + Date.now(), o.id, o.total, Date.now()])).rows[0];
+          await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1", [o.id]);
+          resultStatus = 'new';
+          resultPayStatus = 'paid';
+          void tx;
+        } else {
+          await releaseOrder(db, o.id, false);
+          resultStatus = 'cancelled';
+          resultPayStatus = 'cancelled';
+        }
+      }
+      await db.query('COMMIT');
+      if (req.is('application/json')) {
+        return res.json({ ok: true, id: o.id, status: resultStatus, paymentStatus: resultPayStatus, redirect: '/pay/' + o.id });
+      }
+      res.redirect(303, '/pay/' + o.id);
+    } catch (e) {
+      await db.query('ROLLBACK').catch(() => {});
+      console.error('Click sandbox error:', e.message);
+      res.status(500).send('Sandbox xatosi.');
+    } finally {
+      db.release();
+    }
   });
 }

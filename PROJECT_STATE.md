@@ -36,8 +36,9 @@
 - **Xaridor:** Qidiruv tarixi va `/api/catalog/suggestions`, mobil kategoriya filtrlari, subkategoriya/narx/reyting/mavjudlik filtrlari, doimiy savat (`/api/cart`), tasdiqlangan xaridor sharhlari (`/api/products/:id/reviews`), taqqoslash (`/compare`), yaqinda ko‘rilganlar, promokodlar (`/api/promo/check`), qaytarish arizalari (`/api/orders/:id/return`), bildirishnomalar (`/api/notifications`), Yordam markazi (`/help`).
 - **Sotuvchi:** Savdo statistikasi, komissiya hisobi (`5%`), qaytarish arizalari ko‘rinishi (`/api/seller/analytics`).
 - **Admin:** Xaridorlar, promokodlar, qaytarish arizalari, SMS xarajatlari, xavfsizlik hodisalari, audit loglar va DB/server health monitoringi (`/api/admin/monitoring`).
-- **Yetkazish (`shipping.js`):** 14 ta hudud -> tuman/shahar ma'lumotnomasi, yetkazish narxi kalkulyatori, UzPost adapter interfeysi (rasmiy kalitsiz soxta ulanish yo‘q).
-- **Testlar va CI:** `19 / 19` unit va PostgreSQL 16 integratsion testlar o‘tmoqda; `.github/workflows/ci.yml` yaratilgan; desktop va mobil brauzer QA muvaffaqiyatli tekshirildi.
+- **Yetkazish va UzPost (`shipping.js`, `marketplace-features.js`, `schema.sql`, `public/app.js`):** 14 ta hudud bo‘yicha tuman/shahar ma'lumotnomasi, 24 ta UzPost filial ma'lumotnomasi (koordinatalar bilan), Haversine eng yaqin filial qidiruvi (`GET /api/shipping/branches`), checkoutda **UzPost filialidan olib ketish** (GPS avtomatik yoki qo‘lda tanlash) vs **Manzilga yetkazish** tanlovi, va UzPost adapter interfeysi (rasmiy API kalitsiz avtomatik jo‘natma yaratmaydi).
+- **SMS va Click Sandbox (`phone-auth.js`, `payment-handlers.js`, `public/app.js`):** Eskiz/Click kalitlari olinguncha lokal sinov uchun `SMS_MOCK=true` (`/api/auth/phone/dev-inbox` UI qutisi) va `CLICK_SANDBOX_MOCK=true` (`/api/payments/click/sandbox-pay` bir martalik karta to‘lovi simulyatori) qo‘shildi; **`NODE_ENV === 'production'` da ikkalasi ham qat'iyan 404/bloklangan.**
+- **Testlar va CI:** `21 / 21` unit va PostgreSQL 16 integratsion testlar o‘tmoqda; `.github/workflows/ci.yml` yaratilgan; desktop va mobil brauzer QA tekshirildi.
 
 ---
 

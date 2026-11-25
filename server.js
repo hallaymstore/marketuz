@@ -1,5 +1,5 @@
 import express from 'express';
-import { mountPhoneAuth, smsReady } from './phone-auth.js';
+import { isMockSmsAllowed, mountPhoneAuth, smsReady } from './phone-auth.js';
 import {
   checkAuthLockout,
   deviceLabelFromUa,
@@ -22,12 +22,14 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { products as samples, featuredSamples, regions } from './seed.js';
 import { defaults, validateSite, seasonalState, assetUrl } from './site-config.js';
-import { mountPayments } from './payment-handlers.js';
+import { isClickSandboxAllowed, mountPayments } from './payment-handlers.js';
 import { canAdvanceOrder, checkoutContainsCardData } from './order-safety.js';
 import { buildInterests, rankProducts } from './recommendations.js';
 import { templateWorkbook, parseWorkbook } from './product-import.js';
 import { computePromoDiscount, createNotification, mountMarketplaceFeatures } from './marketplace-features.js';
-import { calculateShipping } from './shipping.js';
+import { calculateShipping, getBranchById } from './shipping.js';
+
+try { process.loadEnvFile?.(); } catch {}
 
 const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -58,7 +60,7 @@ app.use((req, res, next) => {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'strict-origin',
     'X-Frame-Options': 'DENY',
-    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(self)',
     'Content-Security-Policy': "default-src 'self'; object-src 'none'; img-src 'self' data: https:; script-src 'self' https://telegram.org https://my.click.uz; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://my.click.uz; frame-src https://my.click.uz; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://my.click.uz"
   });
   if (process.env.NODE_ENV === 'production') res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
@@ -98,11 +100,14 @@ const externalLinks = value => {
   if(!Array.isArray(value) || value.length>5) throw fail(400,'Mahsulot havolalari ko‘pi bilan 5 ta bo‘lsin.');
   return value.map(x=>{ const label=text(x?.label,45), url=text(x?.url,1000); if(!label || !imageOk(url) || !url.startsWith('https://')) throw fail(400,'Mahsulotning tashqi havolalari HTTPS bo‘lishi kerak.'); return {label,url}; });
 };
-const gatewayConfigured=gateway=>!demoOnly && (gateway==='payme'?!!(process.env.PAYME_MERCHANT_ID&&process.env.PAYME_KEY&&process.env.PAYME_LOGIN):!!(process.env.CLICK_MERCHANT_ID&&process.env.CLICK_SERVICE_ID&&process.env.CLICK_SECRET_KEY));
-const paymentReady=gateway=>gatewayConfigured(gateway) && process.env.PAYMENTS_ENABLED==='true' && process.env.SHIPPING_INCLUDED_IN_PRICE==='true' && ['operator','taxId','address','phone','email','returnPolicy'].every(k=>!!site.legal[k]);
+const gatewayConfigured=gateway=>!demoOnly && (gateway==='payme'?!!(process.env.PAYME_MERCHANT_ID&&process.env.PAYME_KEY&&process.env.PAYME_LOGIN):(!!(process.env.CLICK_MERCHANT_ID&&process.env.CLICK_SERVICE_ID&&process.env.CLICK_SECRET_KEY)||isClickSandboxAllowed()));
+const paymentReady=gateway=>gatewayConfigured(gateway) && ((process.env.PAYMENTS_ENABLED==='true' && process.env.SHIPPING_INCLUDED_IN_PRICE==='true' && ['operator','taxId','address','phone','email','returnPolicy'].every(k=>!!site.legal[k])) || (gateway==='click' && isClickSandboxAllowed()));
 const paymentUrl=(gateway,id,total)=>{
   const ret=site.seo.siteUrl+'/pay/'+id;
   if(gateway==='payme') return 'https://checkout.paycom.uz/'+Buffer.from(`m=${process.env.PAYME_MERCHANT_ID};ac.order_id=${id};a=${total*100};l=uz;c=${encodeURIComponent(ret)}`).toString('base64');
+  if(isClickSandboxAllowed() && !(process.env.CLICK_MERCHANT_ID&&process.env.CLICK_SERVICE_ID&&process.env.CLICK_SECRET_KEY)) {
+    return '/api/payments/click/sandbox-pay?orderId='+encodeURIComponent(id);
+  }
   const u=new URL('https://my.click.uz/services/pay');
   for(const [k,v] of Object.entries({service_id:process.env.CLICK_SERVICE_ID,merchant_id:process.env.CLICK_MERCHANT_ID,amount:total,transaction_param:id,return_url:ret})) u.searchParams.set(k,String(v));
   return u.href;
@@ -167,7 +172,7 @@ const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Da
 setInterval(() => { for (const [key, value] of authHits) if (value.until < Date.now()) authHits.delete(key); }, 20 * 60_000).unref();
 
 app.get('/api/healthz', route(async (req, res) => { if (pool) await pool.query('SELECT 1'); res.json({ ok: true, database: pool ? 'ready' : 'preview' }); }));
-app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function') }));
+app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function'), mockSms:!demoOnly&&isMockSmsAllowed(), clickSandbox:!demoOnly&&isClickSandboxAllowed() }));
 app.get('/media/:id', requireDb, route(async (req,res)=>{
   if(!/^[0-9a-f-]{36}$/.test(req.params.id)) throw fail(404,'Rasm topilmadi.');
   const {rows}=await pool.query('SELECT mime,bytes FROM site_assets WHERE id=$1',[req.params.id]);
@@ -555,8 +560,20 @@ app.put('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const
 app.delete('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const pid = idParam(req.params.id); await pool.query('DELETE FROM favorites WHERE user_id=$1 AND product_id=$2', [req.user.id,pid]); res.json({ ok: true }); }));
 
 app.post('/api/orders', requireDb, auth, route(async (req, res) => {
-  const body = req.body||{}, recipient = text(body.recipient), phone = text(body.phone,30), region = text(body.region,80), district = text(body.district,100), address = text(body.address,300), note = text(body.note,500);
+  const body = req.body||{}, recipient = text(body.recipient), phone = text(body.phone,30), note = text(body.note,500);
   if (checkoutContainsCardData(body)) throw fail(400,'Karta ma’lumotlarini saytga yubormang. Karta Click oynasiga kiritiladi.');
+  const deliveryMode = body.deliveryMode === 'uzpost_pickup' ? 'uzpost_pickup' : 'courier';
+  let region = text(body.region,80), district = text(body.district,100), address = text(body.address,300);
+  let pickupBranchId = null, pickupBranchLabel = null;
+  if (deliveryMode === 'uzpost_pickup') {
+    const branch = getBranchById(text(body.pickupBranchId, 64));
+    if (!branch) throw fail(400, 'UzPost filialini tanlang.');
+    region = branch.region;
+    district = branch.district;
+    address = `${branch.name} — ${branch.address}`;
+    pickupBranchId = branch.id;
+    pickupBranchLabel = `${branch.name} (${branch.address})`;
+  }
   const checkoutKey=body.checkoutKey||null;
   if(checkoutKey && (typeof checkoutKey!=='string'||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(checkoutKey))) throw fail(400,'Buyurtma kaliti noto‘g‘ri.');
   if(body.agree!==true && body.agree!=='on') throw fail(400,'Buyurtma shartlarini tasdiqlang.');
@@ -604,7 +621,7 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
     const deliveryFee = 0;
     const finalTotal = Math.max(1000, subtotal - discountAmount + deliveryFee);
     const id = randomUUID();
-    await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,delivery_fee,total,status,payment_status,checkout_key,promo_code,discount_amount) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,deliveryFee,finalTotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending',checkoutKey,promoCode,discountAmount]);
+    await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,delivery_fee,total,status,payment_status,checkout_key,promo_code,discount_amount,delivery_mode,pickup_branch_id,pickup_branch_label) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,deliveryFee,finalTotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending',checkoutKey,promoCode,discountAmount,deliveryMode,pickupBranchId,pickupBranchLabel]);
     for (const p of detailed) {
       await db.query("UPDATE products SET stock=CASE WHEN stock_mode='tracked' THEN stock-$1 ELSE stock END,sold_count=sold_count+$1,updated_at=now() WHERE id=$2", [p.qty,p.id]);
       if(p.variantId&&p.stock_mode==='tracked')await db.query('UPDATE product_variants SET stock=stock-$1,updated_at=now() WHERE id=$2',[p.qty,p.variantId]);

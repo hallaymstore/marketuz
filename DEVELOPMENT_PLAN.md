@@ -20,11 +20,11 @@
 ## P2 — Sotuvchi, Admin va Yetkazib berish tizimi — **BAJARILDI**
 - [x] Sotuvchi savdo statistikasi, komissiya hisobi va qaytarish arizalari.
 - [x] Admin: xaridorlar, promokodlar, qaytarishlar, SMS xarajatlari, audit/security monitoring, DB/server health.
-- [x] Yetkazish provider abstraction (`shipping.js`), viloyat-tuman bog‘lanishi, tarif kalkulyatori va UzPost stub interfeysi.
+- [x] Yetkazish provider abstraction (`shipping.js`), viloyat-tuman bog‘lanishi, 24 ta UzPost filiali (GPS eng yaqin + qo‘lda tanlash) va `CLICK_SANDBOX_MOCK` sinov karta oynasi (production'da qat'iyan o‘chirilgan).
 
 ## P3 — Performance, Avtomatik Testlar va CI/CD — **BAJARILDI (Production deploy kutilmoqda)**
 - [x] PostgreSQL indekslari va `EXPLAIN ANALYZE` tekshiruvi (`0.058 ms` index scan).
-- [x] `19 / 19` unit, API, OTP replay/expiry/concurrency, session, TOTP 2FA, RBAC va marketplace testlari.
+- [x] `21 / 21` unit, API, OTP replay/expiry/concurrency, session, TOTP 2FA, UzPost branch, Click sandbox, RBAC va marketplace testlari.
 - [x] Desktop (`1280x800`), Tablet (`847x800`), Mobil (`390x844`) brauzer QA tekshiruvlari.
 - [x] `.github/workflows/ci.yml` CI pipeline.
 - [ ] GitHub'ga push qilish va Render'da production deployni tekshirish (GitHub/Render autentifikatsiyasi bilan).

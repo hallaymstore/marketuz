@@ -42,6 +42,21 @@ export const smsReady = () =>
 
 let token = null;
 let tokenUntil = 0;
+const devSmsInbox = [];
+
+function recordDevSms({ phone, code, purpose, message }) {
+  if (!isMockSmsAllowed()) return;
+  devSmsInbox.unshift({
+    id: `mock-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    phone: '+' + phone,
+    code,
+    purpose,
+    message,
+    createdAt: new Date().toISOString()
+  });
+  if (devSmsInbox.length > 25) devSmsInbox.length = 25;
+  console.log(`[DEV MOCK SMS] ${'+' + phone} (${purpose}): ${code}`);
+}
 
 async function eskizRequest(path, { method = 'POST', fields = null, bearer = null } = {}) {
   const response = await fetch('https://notify.eskiz.uz/api/' + path, {
@@ -151,6 +166,8 @@ export function mountPhoneAuth(
       return smsTransport({ phone, code, purpose, message: smsMessageFor(purpose, code) });
     }
     if (isMockSmsAllowed()) {
+      const msg = smsMessageFor(purpose, code);
+      recordDevSms({ phone, code, purpose, message: msg });
       return { providerId: `mock-${Date.now()}`, status: 'mock' };
     }
     return sendViaEskiz({ phone, code, purpose });
@@ -250,6 +267,15 @@ export function mountPhoneAuth(
   app.get('/api/auth/phone/status', (req, res) =>
     res.json({ enabled: !!pool && activeReady(), mock: isMockSmsAllowed() })
   );
+
+  app.get('/api/auth/phone/dev-inbox', (req, res) => {
+    if (!isMockSmsAllowed()) return res.status(404).json({ error: 'Topilmadi.' });
+    const phone = normalizePhone(req.query.phone || '');
+    const messages = phone
+      ? devSmsInbox.filter(m => m.phone === '+' + phone).slice(0, 5)
+      : devSmsInbox.slice(0, 5);
+    res.json({ messages });
+  });
 
   app.post('/api/auth/phone/send', requireDb, rateAuth, route(async (req, res) => {
     ready();

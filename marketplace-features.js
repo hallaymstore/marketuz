@@ -1,5 +1,5 @@
 import { logAudit } from './security.js';
-import { calculateShipping, createShippingProvider, regionDistricts } from './shipping.js';
+import { calculateShipping, createShippingProvider, findNearestBranches, regionDistricts, uzpostBranches } from './shipping.js';
 
 export function computePromoDiscount(promo, subtotal) {
   if (!promo || !promo.active) return { valid: false, discount: 0, reason: 'Promokod faol emas.' };
@@ -31,20 +31,30 @@ export async function createNotification(dbOrPool, { userId, kind = 'info', titl
 export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, route, fail, text, idParam }) {
   const shippingProvider = createShippingProvider();
 
-  // Shipping reference & quote
+  // Shipping reference, UzPost branches & quote
   app.get('/api/shipping/meta', (req, res) => {
     res.json({
       regions: Object.keys(regionDistricts),
       districts: regionDistricts,
+      branches: uzpostBranches,
       provider: { name: shippingProvider.name, configured: shippingProvider.configured }
     });
   });
 
+  app.get('/api/shipping/branches', (req, res) => {
+    const region = text(req.query.region, 80);
+    const lat = req.query.lat !== undefined ? Number(req.query.lat) : NaN;
+    const lng = req.query.lng !== undefined ? Number(req.query.lng) : NaN;
+    const branches = findNearestBranches(lat, lng, region);
+    res.json({ branches });
+  });
+
   app.post('/api/shipping/quote', route(async (req, res) => {
     const region = text(req.body?.region, 80);
+    const deliveryMode = req.body?.deliveryMode === 'uzpost_pickup' ? 'uzpost_pickup' : 'courier';
     const subtotal = Math.max(0, Number(req.body?.subtotal || 0));
     const shippingIncluded = process.env.SHIPPING_INCLUDED_IN_PRICE === 'true';
-    res.json(calculateShipping({ region, subtotal, shippingIncluded }));
+    res.json(calculateShipping({ region, subtotal, shippingIncluded, deliveryMode }));
   }));
 
   // Persistent buyer cart

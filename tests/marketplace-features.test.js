@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../server.js';
 import { calculateShipping, createShippingProvider } from '../shipping.js';
 import { computePromoDiscount } from '../marketplace-features.js';
+import { isClickSandboxAllowed } from '../payment-handlers.js';
 
 const TEST_DB_URL = process.env.TEST_DATABASE_URL || 'postgresql://marketuz:marketuz_local_test_pw@127.0.0.1:5432/marketuz_test';
 
@@ -171,4 +172,75 @@ test('buyer cart sync, promo checkout, verified review, return request, seller i
     assert.ok(mon.auditLogs.length >= 2);
     assert.ok(mon.health.db_bytes > 0);
   });
+});
+
+test('UzPost branch nearest sorting, pickup order creation, and Click sandbox one-time card payment', async () => {
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevSandbox = process.env.CLICK_SANDBOX_MOCK;
+  const prevPayments = process.env.PAYMENTS_ENABLED;
+  const prevShip = process.env.SHIPPING_INCLUDED_IN_PRICE;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.CLICK_SANDBOX_MOCK = 'true';
+    assert.equal(isClickSandboxAllowed(), false);
+
+    process.env.NODE_ENV = 'test';
+    process.env.CLICK_SANDBOX_MOCK = 'true';
+    process.env.PAYMENTS_ENABLED = 'false';
+    process.env.SHIPPING_INCLUDED_IN_PRICE = 'false';
+    assert.equal(isClickSandboxAllowed(), true);
+
+    await withDbApp(async ({ req }) => {
+      const cfg = (await req('/config')).data;
+      assert.equal(cfg.clickSandbox, true);
+      assert.ok(cfg.payments.includes('click'));
+
+      // Nearest UzPost branch sorting around Tashkent center
+      const branchRes = (await req('/shipping/branches?lat=41.3111&lng=69.2797')).data;
+      assert.ok(branchRes.branches.length >= 10);
+      assert.equal(branchRes.branches[0].region, 'Toshkent shahri');
+      assert.ok(branchRes.branches[0].distanceKm <= branchRes.branches[1].distanceKm);
+
+      const buyerCookie = (await req('/auth/register', { method: 'POST', body: { name: 'Filial Xaridor', email: 'pickup@example.com', password: 'StrongPass!2026', agree: true } })).cookie;
+      const cat = (await req('/catalog')).data;
+      const pid = cat.products.find(p => p.stock_mode !== 'replenishable' && !p.variant_count && p.stock >= 1).id;
+
+      // Create order with UzPost branch pickup + Click sandbox payment
+      const order = await req('/orders', {
+        method: 'POST',
+        cookie: buyerCookie,
+        body: {
+          recipient: 'Filial Xaridor',
+          phone: '+998 90 111 22 33',
+          deliveryMode: 'uzpost_pickup',
+          pickupBranchId: branchRes.branches[0].id,
+          paymentMethod: 'click',
+          checkoutKey: randomUUID(),
+          agree: true,
+          items: [{ id: pid, qty: 1 }]
+        }
+      });
+      assert.equal(order.status, 201);
+      assert.equal(order.data.status, 'awaiting_payment');
+      assert.match(order.data.paymentUrl, /^\/api\/payments\/click\/sandbox-pay\?orderId=/);
+
+      // Complete sandbox payment
+      const payResp = await req('/payments/click/sandbox-pay', {
+        method: 'POST',
+        body: { orderId: order.data.id, decision: 'pay' }
+      });
+      assert.ok([200, 303].includes(payResp.status));
+
+      const myOrders = (await req('/orders', { cookie: buyerCookie })).data.orders;
+      assert.equal(myOrders[0].status, 'new');
+      assert.equal(myOrders[0].payment_status, 'paid');
+      assert.equal(myOrders[0].delivery_mode, 'uzpost_pickup');
+      assert.ok(myOrders[0].pickup_branch_label.includes(branchRes.branches[0].name));
+    });
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevSandbox === undefined) delete process.env.CLICK_SANDBOX_MOCK; else process.env.CLICK_SANDBOX_MOCK = prevSandbox;
+    if (prevPayments === undefined) delete process.env.PAYMENTS_ENABLED; else process.env.PAYMENTS_ENABLED = prevPayments;
+    if (prevShip === undefined) delete process.env.SHIPPING_INCLUDED_IN_PRICE; else process.env.SHIPPING_INCLUDED_IN_PRICE = prevShip;
+  }
 });
