@@ -155,13 +155,97 @@ CREATE INDEX IF NOT EXISTS idx_shipment_events_order ON shipment_events(order_id
 -- Verified identity is separate from editable delivery/profile telephone.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_phone VARCHAR(13);
 CREATE UNIQUE INDEX IF NOT EXISTS users_verified_phone_unique ON users(verified_phone) WHERE verified_phone IS NOT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending_secret TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_permissions JSONB NOT NULL DEFAULT '["all"]'::jsonb;
+
 CREATE TABLE IF NOT EXISTS phone_otps (
- phone VARCHAR(12) PRIMARY KEY, digest CHAR(64) NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
- attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 5)
+ phone VARCHAR(12) NOT NULL,
+ purpose VARCHAR(20) NOT NULL DEFAULT 'register',
+ digest CHAR(64) NOT NULL,
+ expires_at TIMESTAMPTZ NOT NULL,
+ attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 5),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY (phone, purpose)
 );
+ALTER TABLE phone_otps ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'register';
+ALTER TABLE phone_otps ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+DO $$ BEGIN
+ IF EXISTS (
+  SELECT 1 FROM pg_constraint c
+  JOIN pg_class t ON t.oid = c.conrelid
+  WHERE t.relname = 'phone_otps' AND c.contype = 'p' AND array_length(c.conkey, 1) = 1
+ ) THEN
+  ALTER TABLE phone_otps DROP CONSTRAINT phone_otps_pkey;
+  ALTER TABLE phone_otps ADD PRIMARY KEY (phone, purpose);
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'phone_otps_purpose_check') THEN
+  ALTER TABLE phone_otps ADD CONSTRAINT phone_otps_purpose_check CHECK(purpose IN ('register','reset','bind','change_phone'));
+ END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS sms_requests (
  id BIGSERIAL PRIMARY KEY, phone VARCHAR(12) NOT NULL, ip TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE sms_requests ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'register';
+ALTER TABLE sms_requests ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'sent';
+ALTER TABLE sms_requests ADD COLUMN IF NOT EXISTS provider_id VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE sms_requests ADD COLUMN IF NOT EXISTS cost_units INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS sms_requests_phone_time ON sms_requests(phone,created_at DESC);
 CREATE INDEX IF NOT EXISTS sms_requests_ip_time ON sms_requests(ip,created_at DESC);
 CREATE INDEX IF NOT EXISTS sms_requests_time ON sms_requests(created_at);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+ id UUID PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ token_hash CHAR(64) NOT NULL UNIQUE,
+ user_agent VARCHAR(240) NOT NULL DEFAULT '',
+ device_label VARCHAR(80) NOT NULL DEFAULT '',
+ ip VARCHAR(64) NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ expires_at TIMESTAMPTZ NOT NULL,
+ revoked_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, revoked_at, expires_at DESC);
+
+CREATE TABLE IF NOT EXISTS auth_attempts (
+ id BIGSERIAL PRIMARY KEY,
+ kind VARCHAR(24) NOT NULL,
+ identifier VARCHAR(200) NOT NULL,
+ ip VARCHAR(64) NOT NULL DEFAULT '',
+ success BOOLEAN NOT NULL DEFAULT false,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_attempts_lookup ON auth_attempts(kind, identifier, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_attempts_ip ON auth_attempts(ip, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS security_events (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ event_type VARCHAR(48) NOT NULL,
+ severity VARCHAR(16) NOT NULL DEFAULT 'info' CHECK(severity IN ('info','warning','high','critical')),
+ ip VARCHAR(64) NOT NULL DEFAULT '',
+ user_agent VARCHAR(240) NOT NULL DEFAULT '',
+ details JSONB NOT NULL DEFAULT '{}'::jsonb,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_security_events_time ON security_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_security_events_user ON security_events(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+ id BIGSERIAL PRIMARY KEY,
+ actor_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ action VARCHAR(64) NOT NULL,
+ target_type VARCHAR(40) NOT NULL DEFAULT '',
+ target_id VARCHAR(80) NOT NULL DEFAULT '',
+ ip VARCHAR(64) NOT NULL DEFAULT '',
+ details JSONB NOT NULL DEFAULT '{}'::jsonb,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id, created_at DESC);

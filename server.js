@@ -1,11 +1,25 @@
 import express from 'express';
-import {mountPhoneAuth,smsReady} from './phone-auth.js';
+import { mountPhoneAuth, smsReady } from './phone-auth.js';
+import {
+  checkAuthLockout,
+  deviceLabelFromUa,
+  generateTotpSecret,
+  logAudit,
+  logSecurityEvent,
+  otpauthUri,
+  passwordStrength,
+  recordAuthAttempt,
+  sha256Hex,
+  signPayload,
+  verifySignedPayload,
+  verifyTotp
+} from './security.js';
 import pg from 'pg';
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { products as samples, featuredSamples, regions } from './seed.js';
 import { defaults, validateSite, seasonalState, assetUrl } from './site-config.js';
 import { mountPayments } from './payment-handlers.js';
@@ -15,9 +29,15 @@ import { templateWorkbook, parseWorkbook } from './product-import.js';
 
 const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
+const shell = await readFile(path.join(root, 'public', 'index.html'), 'utf8');
+
+export function createApp({ smsTransport = null } = {}) {
 const app = express();
-const secret = process.env.SESSION_SECRET || randomBytes(48).toString('hex');
 const demoOnly = !process.env.DATABASE_URL;
+if (!demoOnly && process.env.NODE_ENV === 'production' && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
+  throw new Error('SESSION_SECRET must be at least 32 characters in production.');
+}
+const secret = process.env.SESSION_SECRET || randomBytes(48).toString('hex');
 let site = structuredClone(defaults);
 const pool = demoOnly ? null : new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -75,22 +95,67 @@ const paymentUrl=(gateway,id,total)=>{
   for(const [k,v] of Object.entries({service_id:process.env.CLICK_SERVICE_ID,merchant_id:process.env.CLICK_MERCHANT_ID,amount:total,transaction_param:id,return_url:ret})) u.searchParams.set(k,String(v));
   return u.href;
 };
+const idParam = value => { if (!/^\d+$/.test(String(value || ''))) throw fail(404, 'Ma’lumot topilmadi.'); return String(value); };
 const hashPassword = async password => { const salt = randomBytes(16).toString('hex'); const key = await scrypt(password, salt, 64); return salt + ':' + key.toString('hex'); };
 const verifyPassword = async (password, encoded) => { const [salt, hash] = (encoded || '').split(':'); if (!salt || !hash || !/^[0-9a-f]{128}$/.test(hash)) return false; const actual = await scrypt(password, salt, 64); return timingSafeEqual(Buffer.from(hash, 'hex'), actual); };
-function tokenFor(id) { const payload = Buffer.from(JSON.stringify({ id: String(id), exp: Date.now() + 7 * 864e5 })).toString('base64url'); return payload + '.' + createHmac('sha256', secret).update(payload).digest('base64url'); }
-function tokenId(value) {
-  try { const [payload, signature] = value.split('.'); if (!payload || !signature) return null; const expected = createHmac('sha256', secret).update(payload).digest(); const actual = Buffer.from(signature, 'base64url'); if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null; const obj = JSON.parse(Buffer.from(payload, 'base64url').toString()); return obj.exp > Date.now() && /^\d+$/.test(obj.id) ? obj.id : null; } catch { return null; }
+const SESSION_TTL_MS = 7 * 864e5;
+function tokenFor(id, sid) { return signPayload({ id: String(id), sid: String(sid), exp: Date.now() + SESSION_TTL_MS }, secret); }
+function tokenData(value) {
+  const obj = verifySignedPayload(value, secret);
+  if (!obj || !/^\d+$/.test(String(obj.id || '')) || !/^[a-f0-9-]{36}$/i.test(String(obj.sid || ''))) return null;
+  return { id: String(obj.id), sid: String(obj.sid) };
 }
 function cookieValue(req, name) { const found = (req.headers.cookie || '').split(';').map(x => x.trim()).find(x => x.startsWith(name + '=')); return found?.slice(name.length + 1); }
-const setSession = (res, id) => res.cookie('marketuz_session', tokenFor(id), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: 7 * 864e5 });
-const auth = route(async (req, res, next) => { const id = tokenId(cookieValue(req, 'marketuz_session') || ''); if (!id) throw fail(401, 'Davom etish uchun hisobingizga kiring.'); const { rows } = await pool.query('SELECT id, full_name, email, phone, role, seller_status, avatar_url, cover_url, bio, personalization_enabled FROM users WHERE id=$1', [id]); if (!rows[0]) throw fail(401, 'Hisob topilmadi.'); req.user = rows[0]; next(); });
+const setSessionCookie = (res, id, sid) => res.cookie('marketuz_session', tokenFor(id, sid), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: SESSION_TTL_MS });
+async function createSession(req, res, userId) {
+  const sid = randomUUID();
+  const token = tokenFor(userId, sid);
+  const ua = String(req.get('user-agent') || '').slice(0, 240);
+  const ip = String(req.ip || '').slice(0, 64);
+  if (pool) {
+    await pool.query(
+      "INSERT INTO user_sessions(id, user_id, token_hash, user_agent, device_label, ip, expires_at) VALUES($1,$2,$3,$4,$5,$6, now() + interval '7 days')",
+      [sid, userId, sha256Hex(token), ua, deviceLabelFromUa(ua), ip]
+    );
+  }
+  res.cookie('marketuz_session', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: SESSION_TTL_MS });
+  return sid;
+}
+async function revokeUserSessions(userId, exceptSid = null) {
+  if (!pool) return;
+  if (exceptSid) {
+    await pool.query('UPDATE user_sessions SET revoked_at=now() WHERE user_id=$1 AND id<>$2 AND revoked_at IS NULL', [userId, exceptSid]);
+  } else {
+    await pool.query('UPDATE user_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL', [userId]);
+  }
+}
+async function resolveSession(req) {
+  const raw = cookieValue(req, 'marketuz_session') || '';
+  const data = tokenData(raw);
+  if (!data || !pool) return null;
+  const { rows } = await pool.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, u.verified_phone, u.role, u.seller_status, u.avatar_url, u.cover_url, u.bio, u.personalization_enabled, u.totp_enabled, u.telegram_id, s.id AS sid, s.last_active_at
+     FROM user_sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.id=$1 AND s.user_id=$2 AND s.token_hash=$3 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.deleted_at IS NULL`,
+    [data.sid, data.id, sha256Hex(raw)]
+  );
+  if (!rows[0]) return null;
+  const row = rows[0];
+  if (Date.now() - new Date(row.last_active_at).getTime() > 5 * 60_000) {
+    pool.query('UPDATE user_sessions SET last_active_at=now() WHERE id=$1', [row.sid]).catch(() => {});
+  }
+  const { sid, last_active_at, ...user } = row;
+  return { user, sid };
+}
+const auth = route(async (req, res, next) => { const session = await resolveSession(req); if (!session) throw fail(401, 'Davom etish uchun hisobingizga kiring.'); req.user = session.user; req.sessionId = session.sid; next(); });
 const role = name => (req, res, next) => req.user?.role === name ? next() : next(fail(403, 'Ushbu bo‘lim uchun ruxsat yo‘q.'));
 const authHits = new Map();
 const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Date.now(); const hit = authHits.get(key) || { n: 0, until: now + 15 * 60_000 }; if (hit.until < now) { hit.n = 0; hit.until = now + 15 * 60_000; } if (++hit.n > 25) return res.status(429).json({ error: 'Juda ko‘p urinish. Birozdan keyin qayta urinib ko‘ring.' }); authHits.set(key, hit); next(); };
 setInterval(() => { for (const [key, value] of authHits) if (value.until < Date.now()) authHits.delete(key); }, 20 * 60_000).unref();
 
 app.get('/api/healthz', route(async (req, res) => { if (pool) await pool.query('SELECT 1'); res.json({ ok: true, database: pool ? 'ready' : 'preview' }); }));
-app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, smsEnabled:!demoOnly&&smsReady() }));
+app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function') }));
 app.get('/media/:id', requireDb, route(async (req,res)=>{
   if(!/^[0-9a-f-]{36}$/.test(req.params.id)) throw fail(404,'Rasm topilmadi.');
   const {rows}=await pool.query('SELECT mime,bytes FROM site_assets WHERE id=$1',[req.params.id]);
@@ -181,8 +246,8 @@ app.get('/api/recommendations',route(async(req,res)=>{
   const limit=Math.min(16,Math.max(1,Number.parseInt(req.query.limit,10)||12));
   const validKind=['for-you','together','trending'].includes(req.query.kind)?req.query.kind:'for-you';
   if(demoOnly) return res.json({products:rankProducts(inMemoryCatalog,null,{context:contextId?inMemoryCatalog.find(p=>String(p.id)===contextId):null,limit}),personalized:false});
-  const sessionId=tokenId(cookieValue(req,'marketuz_session')||'');
-  const current=sessionId?(await pool.query('SELECT personalization_enabled FROM users WHERE id=$1',[sessionId])).rows[0]:null;
+  const session=await resolveSession(req), sessionId=session?.user?.id||null;
+  const current=session?.user||null;
   const personalized=!!current?.personalization_enabled && validKind==='for-you';
   let interests=null;
   if(personalized){
@@ -212,20 +277,75 @@ app.get('/api/recommendations',route(async(req,res)=>{
   res.json({products,personalized});
 }));
 
-mountPhoneAuth(app,{pool,requireDb,rateAuth,route,fail,hashPassword,verifyPassword,setSession});
+mountPhoneAuth(app,{pool,requireDb,auth,rateAuth,route,fail,hashPassword,verifyPassword,createSession,revokeUserSessions,smsTransport});
 app.post('/api/auth/register', requireDb, rateAuth, route(async (req, res) => {
   const name = text(req.body.name), email = text(req.body.email, 200).toLowerCase(), password = String(req.body.password || '');
-  if (name.length < 2 || email.endsWith('@marketuz.invalid') || !emailOk(email) || password.length < 10 || password.length > 128) throw fail(400, 'Ism, email va kamida 10 belgili parol kiriting.');
+  if (name.length < 2 || email.endsWith('@marketuz.invalid') || !emailOk(email) || !passwordStrength(password).ok) throw fail(400, 'Ism, email va kamida 10 belgili ishonchli parol kiriting.');
   if (req.body.agree !== true) throw fail(400, 'Foydalanish shartlari va maxfiylik siyosatini tasdiqlang.');
-  try { const result = await pool.query('INSERT INTO users(full_name,email,password_hash) VALUES($1,$2,$3) RETURNING id,full_name,email,phone,role,seller_status', [name,email,await hashPassword(password)]); setSession(res, result.rows[0].id); res.status(201).json({ user: result.rows[0] }); }
+  try {
+    const result = await pool.query(
+      'INSERT INTO users(full_name,email,password_hash) VALUES($1,$2,$3) RETURNING id,full_name,email,phone,verified_phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled,totp_enabled',
+      [name,email,await hashPassword(password)]
+    );
+    await createSession(req, res, result.rows[0].id);
+    await logSecurityEvent(pool, { userId: result.rows[0].id, eventType: 'email_registered', req });
+    res.status(201).json({ user: result.rows[0] });
+  }
   catch (e) { if (e.code === '23505') throw fail(409, 'Bu email bilan hisob allaqachon ochilgan.'); throw e; }
 }));
 app.post('/api/auth/login', requireDb, rateAuth, route(async (req, res) => {
-  const email = text(req.body.email, 200).toLowerCase(), password = String(req.body.password || '');
+  const email = text(req.body.email, 200).toLowerCase(), password = String(req.body.password || ''), totpCode = String(req.body.totpCode || '').trim();
+  const ip = req.ip || 'unknown';
+  await checkAuthLockout(pool, { kind: 'email_login', identifier: email, ip });
   if (!password || password.length > 128 || email.endsWith('@marketuz.invalid')) throw fail(401, 'Email yoki parol noto‘g‘ri.');
-  const { rows } = await pool.query('SELECT id,full_name,email,phone,role,seller_status,password_hash FROM users WHERE email=$1', [email]);
-  if (!rows[0] || !(await verifyPassword(password, rows[0].password_hash))) throw fail(401, 'Email yoki parol noto‘g‘ri.');
-  setSession(res, rows[0].id); const { password_hash, ...user } = rows[0]; res.json({ user });
+  const { rows } = await pool.query(
+    'SELECT id,full_name,email,phone,verified_phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled,totp_enabled,totp_secret,password_hash FROM users WHERE email=$1 AND deleted_at IS NULL',
+    [email]
+  );
+  if (!rows[0] || !(await verifyPassword(password, rows[0].password_hash))) {
+    await recordAuthAttempt(pool, { kind: 'email_login', identifier: email, ip, success: false });
+    throw fail(401, 'Email yoki parol noto‘g‘ri.');
+  }
+  const userRow = rows[0];
+  if (userRow.role === 'admin' && userRow.totp_enabled) {
+    if (!totpCode) {
+      const challengeToken = signPayload({ id: String(userRow.id), purpose: 'admin_2fa', exp: Date.now() + 5 * 60_000 }, secret);
+      return res.json({ requires2fa: true, challengeToken });
+    }
+    if (!verifyTotp(userRow.totp_secret, totpCode)) {
+      await recordAuthAttempt(pool, { kind: 'admin_2fa', identifier: String(userRow.id), ip, success: false });
+      await logSecurityEvent(pool, { userId: userRow.id, eventType: 'admin_2fa_failed', severity: 'warning', req });
+      throw fail(401, '2FA tasdiqlash kodi noto‘g‘ri.');
+    }
+  }
+  await recordAuthAttempt(pool, { kind: 'email_login', identifier: email, ip, success: true, userId: userRow.id, req });
+  await pool.query('UPDATE users SET last_login_at=now(), last_login_ip=$1 WHERE id=$2', [ip.slice(0, 64), userRow.id]).catch(() => {});
+  await createSession(req, res, userRow.id);
+  const { password_hash, totp_secret, ...user } = userRow;
+  res.json({ user });
+}));
+app.post('/api/auth/login/2fa', requireDb, rateAuth, route(async (req, res) => {
+  const challenge = verifySignedPayload(req.body?.challengeToken, secret);
+  const code = String(req.body?.code || '').trim();
+  if (!challenge || challenge.purpose !== 'admin_2fa' || !/^\d+$/.test(String(challenge.id || ''))) {
+    throw fail(401, '2FA sessiyasi muddati tugagan. Qaytadan kiring.');
+  }
+  const ip = req.ip || 'unknown';
+  await checkAuthLockout(pool, { kind: 'admin_2fa', identifier: String(challenge.id), ip });
+  const { rows } = await pool.query(
+    "SELECT id,full_name,email,phone,verified_phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled,totp_enabled,totp_secret FROM users WHERE id=$1 AND role='admin' AND totp_enabled=true AND deleted_at IS NULL",
+    [challenge.id]
+  );
+  if (!rows[0] || !verifyTotp(rows[0].totp_secret, code)) {
+    await recordAuthAttempt(pool, { kind: 'admin_2fa', identifier: String(challenge.id), ip, success: false });
+    await logSecurityEvent(pool, { userId: rows[0]?.id || null, eventType: 'admin_2fa_failed', severity: 'warning', req });
+    throw fail(401, '2FA tasdiqlash kodi noto‘g‘ri.');
+  }
+  await recordAuthAttempt(pool, { kind: 'admin_2fa', identifier: String(challenge.id), ip, success: true, userId: rows[0].id, req });
+  await pool.query('UPDATE users SET last_login_at=now(), last_login_ip=$1 WHERE id=$2', [ip.slice(0, 64), rows[0].id]).catch(() => {});
+  await createSession(req, res, rows[0].id);
+  const { totp_secret, ...user } = rows[0];
+  res.json({ user });
 }));
 app.post('/api/auth/telegram', requireDb, rateAuth, route(async(req,res)=>{
   const token=process.env.TELEGRAM_BOT_TOKEN;
@@ -241,8 +361,8 @@ app.post('/api/auth/telegram', requireDb, rateAuth, route(async(req,res)=>{
   const tgId=String(tg.id||''); if(!/^\d{1,20}$/.test(tgId)) throw fail(400,'Telegram ID xato.');
   const name=text([tg.first_name,tg.last_name].filter(Boolean).join(' '),100)||'Telegram foydalanuvchisi';
   const email=`telegram-${tgId}@marketuz.invalid`;
-  const {rows}=await pool.query("INSERT INTO users(full_name,email,password_hash,telegram_id) VALUES($1,$2,$3,$4) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name RETURNING id,full_name,email,phone,role,seller_status",[name,email,await hashPassword(randomBytes(36).toString('hex')),tgId]);
-  setSession(res,rows[0].id); res.json({user:rows[0]});
+  const {rows}=await pool.query("INSERT INTO users(full_name,email,password_hash,telegram_id) VALUES($1,$2,$3,$4) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name RETURNING id,full_name,email,phone,verified_phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled,totp_enabled",[name,email,await hashPassword(randomBytes(36).toString('hex')),tgId]);
+  await createSession(req, res, rows[0].id); res.json({user:rows[0]});
 }));
 app.post('/api/telegram/webhook', route(async(req,res)=>{
   const token=process.env.TELEGRAM_BOT_TOKEN,secretToken=process.env.TELEGRAM_WEBHOOK_SECRET;
@@ -256,13 +376,20 @@ app.post('/api/telegram/webhook', route(async(req,res)=>{
   }
   res.json({ok:true});
 }));
-app.post('/api/auth/logout', (req, res) => { res.clearCookie('marketuz_session', { path: '/' }); res.json({ ok: true }); });
+app.post('/api/auth/logout', route(async (req, res) => {
+  const session = await resolveSession(req).catch(() => null);
+  if (session?.sid && pool) {
+    await pool.query('UPDATE user_sessions SET revoked_at=now() WHERE id=$1', [session.sid]).catch(() => {});
+  }
+  res.clearCookie('marketuz_session', { path: '/' });
+  res.json({ ok: true });
+}));
 app.get('/api/me', requireDb, auth, (req, res) => res.json({ user: req.user }));
 app.patch('/api/me', requireDb, auth, route(async (req, res) => {
   const name = text(req.body.name), phone = text(req.body.phone, 30),bio=text(req.body.bio,300),avatar=text(req.body.avatarUrl,1000),cover=text(req.body.coverUrl,1000);
   if (name.length < 2 || (phone && !/^\+?[\d\s()-]{9,25}$/.test(phone))) throw fail(400, 'Ism yoki telefon raqami xato.');
   if((avatar&&!imageOk(avatar))||(cover&&!imageOk(cover))) throw fail(400,'Profil rasmi yoki fon havolasi xato.');
-  const { rows } = await pool.query('UPDATE users SET full_name=$1,phone=$2,bio=$3,avatar_url=$4,cover_url=$5 WHERE id=$6 RETURNING id,full_name,email,phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled', [name,phone,bio,avatar,cover,req.user.id]); res.json({ user: rows[0] });
+  const { rows } = await pool.query('UPDATE users SET full_name=$1,phone=$2,bio=$3,avatar_url=$4,cover_url=$5 WHERE id=$6 RETURNING id,full_name,email,phone,verified_phone,role,seller_status,avatar_url,cover_url,bio,personalization_enabled,totp_enabled', [name,phone,bio,avatar,cover,req.user.id]); res.json({ user: rows[0] });
 }));
 app.patch('/api/me/personalization',requireDb,auth,route(async(req,res)=>{
   if(typeof req.body.enabled!=='boolean') throw fail(400,'Tanlov xato.');
@@ -288,29 +415,104 @@ app.get('/api/shops/:id',requireDb,route(async(req,res)=>{
   if(!rows[0]) throw fail(404,'Do‘kon topilmadi.');
   const cursor=/^\d+$/.test(String(req.query.cursor||''))?Number(req.query.cursor):null;
   const {rows:products}=await pool.query(`SELECT ${catalogFields} FROM products WHERE seller_id=$1 AND status='active' ${cursor?'AND id<$2':''} ORDER BY id DESC LIMIT 25`,cursor?[req.params.id,cursor]:[req.params.id]);
-  const sessionId=tokenId(cookieValue(req,'marketuz_session')||'');let following=false;
+  const sessionObj=await resolveSession(req), sessionId=sessionObj?.user?.id||null;let following=false;
   if(sessionId) following=!!(await pool.query('SELECT 1 FROM seller_follows WHERE seller_id=$1 AND buyer_id=$2',[req.params.id,sessionId])).rowCount;
   res.json({seller:rows[0],products:products.slice(0,24),nextCursor:products.length>24?String(products[23].id):null,following});
 }));
 app.put('/api/shops/:id/follow',requireDb,auth,route(async(req,res)=>{
-  if(!/^\d+$/.test(req.params.id)||String(req.params.id)===String(req.user.id)) throw fail(400,'Do‘kon xato.');
-  const {rowCount}=await pool.query("INSERT INTO seller_follows(buyer_id,seller_id) SELECT $1,id FROM users WHERE id=$2 AND role='seller' ON CONFLICT DO NOTHING",[req.user.id,req.params.id]);
-  if(!rowCount){const found=await pool.query("SELECT id FROM users WHERE id=$1 AND role='seller'",[req.params.id]);if(!found.rowCount) throw fail(404,'Do‘kon topilmadi.');}
+  const shopId = idParam(req.params.id);
+  if(shopId===String(req.user.id)) throw fail(400,'Do‘kon xato.');
+  const {rowCount}=await pool.query("INSERT INTO seller_follows(buyer_id,seller_id) SELECT $1,id FROM users WHERE id=$2 AND role='seller' ON CONFLICT DO NOTHING",[req.user.id,shopId]);
+  if(!rowCount){const found=await pool.query("SELECT id FROM users WHERE id=$1 AND role='seller'",[shopId]);if(!found.rowCount) throw fail(404,'Do‘kon topilmadi.');}
   res.json({following:true});
 }));
-app.delete('/api/shops/:id/follow',requireDb,auth,route(async(req,res)=>{await pool.query('DELETE FROM seller_follows WHERE buyer_id=$1 AND seller_id=$2',[req.user.id,req.params.id]);res.json({following:false});}));
+app.delete('/api/shops/:id/follow',requireDb,auth,route(async(req,res)=>{await pool.query('DELETE FROM seller_follows WHERE buyer_id=$1 AND seller_id=$2',[req.user.id,idParam(req.params.id)]);res.json({following:false});}));
 app.post('/api/me/password', requireDb, auth, rateAuth, route(async (req, res) => {
   const old = String(req.body.currentPassword || ''), next = String(req.body.newPassword || '');
   const { rows } = await pool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
   if (!(await verifyPassword(old, rows[0].password_hash))) throw fail(400, 'Joriy parol xato.');
-  if (next.length < 10 || next.length > 128) throw fail(400, 'Yangi parol kamida 10 belgidan iborat bo‘lsin.');
-  await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [await hashPassword(next),req.user.id]); res.json({ ok: true });
+  if (!passwordStrength(next).ok) throw fail(400, 'Yangi parol kamida 10 belgili va ishonchli bo‘lsin.');
+  if (req.user.role === 'admin' && next.length < 16) throw fail(400, 'Administrator paroli kamida 16 belgidan iborat bo‘lsin.');
+  await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [await hashPassword(next), req.user.id]);
+  const newSid = await createSession(req, res, req.user.id);
+  await revokeUserSessions(req.user.id, newSid);
+  await logSecurityEvent(pool, { userId: req.user.id, eventType: 'password_changed', severity: 'warning', req });
+  res.json({ ok: true, message: 'Parol yangilandi va boshqa qurilmalardagi sessiyalar yopildi.' });
+}));
+app.get('/api/me/sessions', requireDb, auth, route(async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT id, device_label, ip, created_at, last_active_at, expires_at FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL AND expires_at > now() ORDER BY last_active_at DESC LIMIT 30',
+    [req.user.id]
+  );
+  res.json({ sessions: rows.map(s => ({ ...s, current: s.id === req.sessionId })) });
+}));
+app.post('/api/me/sessions/refresh', requireDb, auth, route(async (req, res) => {
+  const oldSid = req.sessionId;
+  const newSid = await createSession(req, res, req.user.id);
+  await pool.query('UPDATE user_sessions SET revoked_at=now() WHERE id=$1 AND user_id=$2', [oldSid, req.user.id]);
+  res.json({ ok: true, sessionId: newSid });
+}));
+app.post('/api/me/sessions/logout-others', requireDb, auth, route(async (req, res) => {
+  await revokeUserSessions(req.user.id, req.sessionId);
+  await logSecurityEvent(pool, { userId: req.user.id, eventType: 'sessions_revoked_others', req });
+  res.json({ ok: true });
+}));
+app.post('/api/me/sessions/logout-all', requireDb, auth, route(async (req, res) => {
+  await revokeUserSessions(req.user.id, null);
+  await logSecurityEvent(pool, { userId: req.user.id, eventType: 'sessions_revoked_all', req });
+  res.clearCookie('marketuz_session', { path: '/' });
+  res.json({ ok: true });
+}));
+app.delete('/api/me/sessions/:sid', requireDb, auth, route(async (req, res) => {
+  if (!/^[a-f0-9-]{36}$/i.test(req.params.sid)) throw fail(404, 'Sessiya topilmadi.');
+  const r = await pool.query('UPDATE user_sessions SET revoked_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL RETURNING id', [req.params.sid, req.user.id]);
+  if (!r.rowCount) throw fail(404, 'Sessiya topilmadi.');
+  if (req.params.sid === req.sessionId) res.clearCookie('marketuz_session', { path: '/' });
+  res.json({ ok: true, loggedOutCurrent: req.params.sid === req.sessionId });
+}));
+app.post('/api/me/delete', requireDb, auth, rateAuth, route(async (req, res) => {
+  if (req.user.role === 'admin') throw fail(403, 'Administrator hisobini bu yerdan o‘chirib bo‘lmaydi.');
+  const password = String(req.body?.currentPassword || '');
+  const confirmText = String(req.body?.confirm || '').trim();
+  const { rows: [account] } = await pool.query('SELECT password_hash, telegram_id FROM users WHERE id=$1 AND deleted_at IS NULL', [req.user.id]);
+  if (!account) throw fail(404, 'Hisob topilmadi.');
+  if (account.telegram_id && !password) {
+    if (confirmText !== 'OCHIRISH' && confirmText !== 'O‘CHIRISH') throw fail(400, 'Tasdiqlash uchun O‘CHIRISH so‘zini kiriting.');
+  } else if (!(await verifyPassword(password, account.password_hash))) {
+    throw fail(400, 'Joriy parol noto‘g‘ri.');
+  }
+  const activeOrders = await pool.query("SELECT id FROM orders WHERE buyer_id=$1 AND status NOT IN ('delivered','cancelled') LIMIT 1", [req.user.id]);
+  if (activeOrders.rowCount) throw fail(409, 'Faol buyurtmalaringiz yakunlanmaguncha hisobni o‘chirib bo‘lmaydi.');
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    await db.query('DELETE FROM favorites WHERE user_id=$1', [req.user.id]);
+    await db.query('DELETE FROM product_events WHERE user_id=$1', [req.user.id]);
+    await db.query('DELETE FROM seller_follows WHERE buyer_id=$1 OR seller_id=$1', [req.user.id]);
+    await db.query("UPDATE products SET status='archived', updated_at=now() WHERE seller_id=$1", [req.user.id]);
+    await db.query('UPDATE user_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL', [req.user.id]);
+    await db.query(
+      `UPDATE users SET full_name='O‘chirilgan foydalanuvchi', email=$2, phone=NULL, verified_phone=NULL, telegram_id=NULL,
+       avatar_url='', cover_url='', bio='', password_hash='!deleted!', personalization_enabled=false, deleted_at=now()
+       WHERE id=$1`,
+      [req.user.id, `deleted-${req.user.id}-${Date.now()}@marketuz.invalid`]
+    );
+    await db.query('COMMIT');
+  } catch (e) {
+    await db.query('ROLLBACK');
+    throw e;
+  } finally {
+    db.release();
+  }
+  await logSecurityEvent(pool, { userId: req.user.id, eventType: 'account_deleted', severity: 'warning', req });
+  res.clearCookie('marketuz_session', { path: '/' });
+  res.json({ ok: true, message: 'Hisobingiz o‘chirildi.' });
 }));
 app.get('/api/favorites', requireDb, auth, route(async (req, res) => {
   const { rows } = await pool.query(`SELECT ${catalogFields.split(',').map(x=>'p.'+x).join(',')} FROM favorites f JOIN products p ON p.id=f.product_id WHERE f.user_id=$1 AND p.status='active' ORDER BY p.id DESC LIMIT 100`, [req.user.id]); res.json({ products: rows });
 }));
-app.put('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const { rowCount } = await pool.query("INSERT INTO favorites(user_id,product_id) SELECT $1,id FROM products WHERE id=$2 AND status='active' ON CONFLICT DO NOTHING", [req.user.id,req.params.id]); res.json({ ok: true, added: !!rowCount }); }));
-app.delete('/api/favorites/:id', requireDb, auth, route(async (req, res) => { await pool.query('DELETE FROM favorites WHERE user_id=$1 AND product_id=$2', [req.user.id,req.params.id]); res.json({ ok: true }); }));
+app.put('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const pid = idParam(req.params.id); const { rowCount } = await pool.query("INSERT INTO favorites(user_id,product_id) SELECT $1,id FROM products WHERE id=$2 AND status='active' ON CONFLICT DO NOTHING", [req.user.id,pid]); res.json({ ok: true, added: !!rowCount }); }));
+app.delete('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const pid = idParam(req.params.id); await pool.query('DELETE FROM favorites WHERE user_id=$1 AND product_id=$2', [req.user.id,pid]); res.json({ ok: true }); }));
 
 app.post('/api/orders', requireDb, auth, route(async (req, res) => {
   const body = req.body||{}, recipient = text(body.recipient), phone = text(body.phone,30), region = text(body.region,80), district = text(body.district,100), address = text(body.address,300), note = text(body.note,500);
@@ -439,29 +641,58 @@ async function saveProductRequest(req,{id=null,sellerId=null,status='pending'}={
 app.get('/api/subcategories',route(async(req,res)=>{if(demoOnly)return res.json({subcategories:[]});const {rows}=await pool.query('SELECT id,category,name FROM product_subcategories WHERE category=ANY($1::text[]) ORDER BY category,name',[site.categories.map(c=>c.id)]);res.json({subcategories:rows});}));
 app.get('/api/admin/subcategories', requireDb, auth, role('admin'),route(async(req,res)=>{const {rows}=await pool.query('SELECT id,category,name FROM product_subcategories ORDER BY category,name');res.json({subcategories:rows});}));
 app.post('/api/admin/subcategories', requireDb, auth, role('admin'),route(async(req,res)=>{const category=text(req.body.category,40),name=text(req.body.name,80);if(!site.categories.some(x=>x.id===category)||name.length<2)throw fail(400,'Kategoriya va quyi kategoriya nomini tekshiring.');const {rows}=await pool.query('INSERT INTO product_subcategories(category,name) VALUES($1,$2) ON CONFLICT(category,name) DO UPDATE SET name=excluded.name RETURNING *',[category,name]);res.status(201).json({subcategory:rows[0]});}));
-app.delete('/api/admin/subcategories/:id', requireDb, auth, role('admin'),route(async(req,res)=>{const row=(await pool.query('SELECT category,name FROM product_subcategories WHERE id=$1',[req.params.id])).rows[0];if(!row)throw fail(404,'Quyi kategoriya topilmadi.');const used=await pool.query("SELECT 1 FROM products WHERE category=$1 AND subcategory=$2 AND status!='archived' LIMIT 1",[row.category,row.name]);if(used.rowCount)throw fail(409,'Bu quyi kategoriyada mahsulotlar bor.');await pool.query('DELETE FROM product_subcategories WHERE id=$1',[req.params.id]);res.json({ok:true});}));
-app.get('/api/seller/products/:id',requireDb,auth,role('seller'),route(async(req,res)=>{const product=(await pool.query("SELECT * FROM products WHERE id=$1 AND seller_id=$2",[req.params.id,req.user.id])).rows[0];if(!product)throw fail(404,'Mahsulot topilmadi.');product.variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active ORDER BY position,id',[product.id])).rows;res.json({product});}));
+app.delete('/api/admin/subcategories/:id', requireDb, auth, role('admin'),route(async(req,res)=>{const sid=idParam(req.params.id);const row=(await pool.query('SELECT category,name FROM product_subcategories WHERE id=$1',[sid])).rows[0];if(!row)throw fail(404,'Quyi kategoriya topilmadi.');const used=await pool.query("SELECT 1 FROM products WHERE category=$1 AND subcategory=$2 AND status!='archived' LIMIT 1",[row.category,row.name]);if(used.rowCount)throw fail(409,'Bu quyi kategoriyada mahsulotlar bor.');await pool.query('DELETE FROM product_subcategories WHERE id=$1',[sid]);await logAudit(pool,{actorId:req.user.id,action:'subcategory_deleted',targetType:'subcategory',targetId:sid,req,details:row});res.json({ok:true});}));
+app.get('/api/seller/products/:id',requireDb,auth,role('seller'),route(async(req,res)=>{const pid=idParam(req.params.id);const product=(await pool.query("SELECT * FROM products WHERE id=$1 AND seller_id=$2",[pid,req.user.id])).rows[0];if(!product)throw fail(404,'Mahsulot topilmadi.');product.variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active ORDER BY position,id',[product.id])).rows;res.json({product});}));
 app.post('/api/seller/products', requireDb, auth, role('seller'), route(async (req,res) => { const product=await saveProductRequest(req,{sellerId:req.user.id});res.status(201).json({product}); }));
-app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const product=await saveProductRequest(req,{id:req.params.id,sellerId:req.user.id});res.json({product}); }));
-app.delete('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const result=await pool.query("UPDATE products SET status='archived',updated_at=now() WHERE id=$1 AND seller_id=$2 RETURNING id",[req.params.id,req.user.id]); if(!result.rowCount) throw fail(404,'Mahsulot topilmadi.'); res.json({ok:true}); }));
+app.patch('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const product=await saveProductRequest(req,{id:idParam(req.params.id),sellerId:req.user.id});res.json({product}); }));
+app.delete('/api/seller/products/:id', requireDb, auth, role('seller'), route(async (req,res) => { const pid=idParam(req.params.id);const result=await pool.query("UPDATE products SET status='archived',updated_at=now() WHERE id=$1 AND seller_id=$2 RETURNING id",[pid,req.user.id]); if(!result.rowCount) throw fail(404,'Mahsulot topilmadi.'); res.json({ok:true}); }));
 app.get('/api/seller/orders', requireDb, auth, role('seller'), route(async (req,res) => { const { rows }=await pool.query('SELECT i.*,o.status AS order_status,o.created_at,o.region,o.district,o.recipient,o.phone FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.seller_id=$1 ORDER BY o.created_at DESC LIMIT 100',[req.user.id]); res.json({items:rows}); }));
-app.patch('/api/seller/order-items/:id', requireDb, auth, role('seller'), route(async (req,res) => { const status=text(req.body.status,20); if(!['packing','ready'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE order_items i SET fulfillment_status=$1 FROM orders o WHERE i.id=$2 AND i.seller_id=$3 AND i.order_id=o.id AND o.status NOT IN ('awaiting_payment','cancelled','delivered') RETURNING i.*",[status,req.params.id,req.user.id]); if(!rows[0]) throw fail(404,'Buyurtma topilmadi.'); res.json({item:rows[0]}); }));
+app.patch('/api/seller/order-items/:id', requireDb, auth, role('seller'), route(async (req,res) => { const oid=idParam(req.params.id),status=text(req.body.status,20); if(!['packing','ready'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE order_items i SET fulfillment_status=$1 FROM orders o WHERE i.id=$2 AND i.seller_id=$3 AND i.order_id=o.id AND o.status NOT IN ('awaiting_payment','cancelled','delivered') RETURNING i.*",[status,oid,req.user.id]); if(!rows[0]) throw fail(404,'Buyurtma topilmadi.'); res.json({item:rows[0]}); }));
 
-app.get('/api/admin/overview', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT (SELECT count(*)::int FROM users) AS users,(SELECT count(*)::int FROM users WHERE seller_status='pending') AS seller_requests,(SELECT count(*)::int FROM products WHERE status='pending') AS pending_products,(SELECT count(*)::int FROM products WHERE status='active') AS active_products,(SELECT count(*)::int FROM orders WHERE status!='cancelled') AS orders,(SELECT coalesce(sum(subtotal),0)::bigint FROM orders WHERE status!='cancelled') AS order_value"); res.json({stats:rows[0]}); }));
-app.get('/api/admin/sellers', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT id,full_name,email,phone,role,seller_status,created_at FROM users WHERE seller_status IN ('pending','approved','rejected') ORDER BY created_at DESC LIMIT 100"); res.json({sellers:rows}); }));
-app.patch('/api/admin/sellers/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['approved','rejected'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE users SET seller_status=$1,role=CASE WHEN $3 THEN 'seller' ELSE 'buyer' END WHERE id=$2 AND role!='admin' RETURNING id,full_name,email,seller_status",[status,req.params.id,status==='approved']); if(!rows[0]) throw fail(404,'Sotuvchi topilmadi.'); res.json({seller:rows[0]}); }));
+app.get('/api/admin/security/2fa', requireDb, auth, role('admin'), (req, res) => res.json({ enabled: !!req.user.totp_enabled }));
+app.post('/api/admin/security/2fa/setup', requireDb, auth, role('admin'), route(async (req, res) => {
+  const totpSecret = generateTotpSecret();
+  await pool.query('UPDATE users SET totp_pending_secret=$1 WHERE id=$2', [totpSecret, req.user.id]);
+  res.json({ secret: totpSecret, otpauthUri: otpauthUri({ issuer: site.brand.name || 'Marketuz', account: req.user.email, secret: totpSecret }) });
+}));
+app.post('/api/admin/security/2fa/enable', requireDb, auth, role('admin'), rateAuth, route(async (req, res) => {
+  const code = String(req.body?.code || '').trim(), currentPassword = String(req.body?.currentPassword || '');
+  const { rows: [row] } = await pool.query('SELECT password_hash, totp_pending_secret FROM users WHERE id=$1', [req.user.id]);
+  if (!row || !(await verifyPassword(currentPassword, row.password_hash))) throw fail(400, 'Joriy parol noto‘g‘ri.');
+  if (!row.totp_pending_secret || !verifyTotp(row.totp_pending_secret, code)) throw fail(400, '2FA kodi noto‘g‘ri.');
+  await pool.query('UPDATE users SET totp_secret=$1, totp_pending_secret=NULL, totp_enabled=true WHERE id=$2', [row.totp_pending_secret, req.user.id]);
+  await revokeUserSessions(req.user.id, req.sessionId);
+  await logAudit(pool, { actorId: req.user.id, action: 'admin_2fa_enabled', targetType: 'user', targetId: String(req.user.id), req });
+  await logSecurityEvent(pool, { userId: req.user.id, eventType: 'admin_2fa_enabled', severity: 'info', req });
+  res.json({ ok: true, enabled: true });
+}));
+app.post('/api/admin/security/2fa/disable', requireDb, auth, role('admin'), rateAuth, route(async (req, res) => {
+  const code = String(req.body?.code || '').trim(), currentPassword = String(req.body?.currentPassword || '');
+  const { rows: [row] } = await pool.query('SELECT password_hash, totp_secret, totp_enabled FROM users WHERE id=$1', [req.user.id]);
+  if (!row?.totp_enabled) throw fail(400, '2FA yoqilmagan.');
+  if (!(await verifyPassword(currentPassword, row.password_hash))) throw fail(400, 'Joriy parol noto‘g‘ri.');
+  if (!verifyTotp(row.totp_secret, code)) throw fail(400, '2FA kodi noto‘g‘ri.');
+  await pool.query('UPDATE users SET totp_secret=NULL, totp_pending_secret=NULL, totp_enabled=false WHERE id=$1', [req.user.id]);
+  await logAudit(pool, { actorId: req.user.id, action: 'admin_2fa_disabled', targetType: 'user', targetId: String(req.user.id), req });
+  await logSecurityEvent(pool, { userId: req.user.id, eventType: 'admin_2fa_disabled', severity: 'warning', req });
+  res.json({ ok: true, enabled: false });
+}));
+
+app.get('/api/admin/overview', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT (SELECT count(*)::int FROM users WHERE deleted_at IS NULL) AS users,(SELECT count(*)::int FROM users WHERE seller_status='pending' AND deleted_at IS NULL) AS seller_requests,(SELECT count(*)::int FROM products WHERE status='pending') AS pending_products,(SELECT count(*)::int FROM products WHERE status='active') AS active_products,(SELECT count(*)::int FROM orders WHERE status!='cancelled') AS orders,(SELECT coalesce(sum(subtotal),0)::bigint FROM orders WHERE status!='cancelled') AS order_value"); res.json({stats:rows[0]}); }));
+app.get('/api/admin/sellers', requireDb, auth, role('admin'), route(async (req,res) => { const {rows}=await pool.query("SELECT id,full_name,email,phone,verified_phone,role,seller_status,created_at FROM users WHERE seller_status IN ('pending','approved','rejected') AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 100"); res.json({sellers:rows}); }));
+app.patch('/api/admin/sellers/:id', requireDb, auth, role('admin'), route(async (req,res) => { const sid=idParam(req.params.id),status=text(req.body.status,20); if(!['approved','rejected'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query("UPDATE users SET seller_status=$1,role=CASE WHEN $3 THEN 'seller' ELSE 'buyer' END WHERE id=$2 AND role!='admin' AND deleted_at IS NULL RETURNING id,full_name,email,seller_status",[status,sid,status==='approved']); if(!rows[0]) throw fail(404,'Sotuvchi topilmadi.'); await logAudit(pool,{actorId:req.user.id,action:'seller_'+status,targetType:'user',targetId:sid,req}); res.json({seller:rows[0]}); }));
 app.get('/api/admin/products', requireDb, auth, role('admin'), route(async (req,res) => { const cursor=decodeCursor(req.query.cursor,'admin','','');let where='';const params=[];if(cursor){params.push(cursor[3],cursor[4]);where="WHERE (CASE WHEN p.status='pending' THEN 0 ELSE 1 END)>$1 OR ((CASE WHEN p.status='pending' THEN 0 ELSE 1 END)=$1 AND p.id<$2)";}const {rows}=await pool.query(`SELECT p.*,u.full_name AS seller_name FROM products p LEFT JOIN users u ON u.id=p.seller_id ${where} ORDER BY CASE WHEN p.status='pending' THEN 0 ELSE 1 END,p.id DESC LIMIT 51`,params);const products=rows.slice(0,50),last=products.at(-1);res.json({products,nextCursor:rows.length>50?encodeCursor(['admin','','',last.status==='pending'?0:1,Number(last.id)]):null}); }));
-app.get('/api/admin/products/:id/details', requireDb,auth,role('admin'),route(async(req,res)=>{const product=(await pool.query('SELECT * FROM products WHERE id=$1',[req.params.id])).rows[0];if(!product)throw fail(404,'Mahsulot topilmadi.');product.variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active ORDER BY position,id',[product.id])).rows;res.json({product});}));
+app.get('/api/admin/products/:id/details', requireDb,auth,role('admin'),route(async(req,res)=>{const pid=idParam(req.params.id);const product=(await pool.query('SELECT * FROM products WHERE id=$1',[pid])).rows[0];if(!product)throw fail(404,'Mahsulot topilmadi.');product.variants=(await pool.query('SELECT id,label,sku,price,stock,image_url FROM product_variants WHERE product_id=$1 AND active ORDER BY position,id',[product.id])).rows;res.json({product});}));
 app.post('/api/admin/products', requireDb, auth, role('admin'), route(async(req,res)=>{
   const status=text(req.body.status,20);
   if(!['active','pending'].includes(status)) throw fail(400,'Yangi mahsulot holati xato.');
-  const product=await saveProductRequest(req,{status});res.status(201).json({product});
+  const product=await saveProductRequest(req,{status});await logAudit(pool,{actorId:req.user.id,action:'admin_product_created',targetType:'product',targetId:String(product.id),req,details:{status}});res.status(201).json({product});
 }));
-app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,req.params.id]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); res.json({product:rows[0]}); }));
+app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const pid=idParam(req.params.id),status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,pid]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); await logAudit(pool,{actorId:req.user.id,action:'admin_product_'+status,targetType:'product',targetId:pid,req}); res.json({product:rows[0]}); }));
 app.patch('/api/admin/products/:id/details', requireDb, auth, role('admin'), route(async(req,res)=>{
-  const status=text(req.body.status,20);
+  const pid=idParam(req.params.id),status=text(req.body.status,20);
   if(!['active','pending','rejected','archived'].includes(status)) throw fail(400,'Mahsulot holati xato.');
-  const product=await saveProductRequest(req,{id:req.params.id,status});res.json({product});
+  const product=await saveProductRequest(req,{id:pid,status});await logAudit(pool,{actorId:req.user.id,action:'admin_product_updated',targetType:'product',targetId:pid,req,details:{status}});res.json({product});
 }));
 const manageProducts=(req,res,next)=>['admin','seller'].includes(req.user?.role)?next():next(fail(403,'Mahsulotlarni boshqarish uchun ruxsat yo‘q.'));
 app.get('/api/catalog-tools/template.xlsx',requireDb,auth,manageProducts,route(async(req,res)=>{res.set('Cache-Control','no-store').set('Content-Disposition','attachment; filename="marketuz-mahsulotlar.xlsx"').type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(await templateWorkbook());}));
@@ -490,7 +721,7 @@ app.get('/api/admin/orders', requireDb, auth, role('admin'), route(async (req,re
 app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (req,res) => {
   const status=text(req.body.status,24),tracking=text(req.body.trackingNumber,100);
   if(!['new','accepted','packing','handed_over','in_transit','delivered','cancelled'].includes(status)) throw fail(400,'Status xato.');
-  if(status==='cancelled'){await cancelOrder(req.params.id,null);return res.json({ok:true});}
+  if(status==='cancelled'){await cancelOrder(req.params.id,null);await logAudit(pool,{actorId:req.user.id,action:'admin_order_cancelled',targetType:'order',targetId:req.params.id,req});return res.json({ok:true});}
   if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(req.params.id)) throw fail(404,'Buyurtma topilmadi.');
   if(tracking&&!/^[\w -]{5,100}$/.test(tracking)) throw fail(400,'Kuzatuv raqami xato.');
   const db=await pool.connect();
@@ -505,7 +736,9 @@ app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (
       order=(await db.query('UPDATE orders SET status=$1,tracking_number=$2,updated_at=now() WHERE id=$3 RETURNING *',[status,trackingNumber,current.id])).rows[0];
       await db.query('INSERT INTO shipment_events(order_id,source,status,tracking_number) VALUES($1,$2,$3,$4)',[order.id,'admin',status,trackingNumber]);
     }
-    await db.query('COMMIT');res.json({order});
+    await db.query('COMMIT');
+    await logAudit(pool,{actorId:req.user.id,action:'admin_order_updated',targetType:'order',targetId:order.id,req,details:{status,trackingNumber}});
+    res.json({order});
   }catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
 }));
 
@@ -520,7 +753,6 @@ app.get('/sitemap.xml',route(async(req,res)=>{
   res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map(u=>`<url><loc>${htmlEsc(site.seo.siteUrl+u)}</loc></url>`).join('')}</urlset>`);
 }));
 app.use(express.static(path.join(root,'public'),{ maxAge: '1h', index: false }));
-const shell=await readFile(path.join(root,'public','index.html'),'utf8');
 app.get('*', route(async (req,res) => {
   if(req.path.startsWith('/api/')) return res.status(404).json({error:'API manzili topilmadi.'});
   let title=site.seo.title, description=site.seo.description, picture=site.seo.ogImage, type='website', structured='';
@@ -564,19 +796,42 @@ async function initialize() {
     if(!existing.rows[0]) await pool.query("INSERT INTO users(full_name,email,password_hash,role) VALUES('Marketuz admin',$1,$2,'admin')",[adminEmail,await hashPassword(adminPassword)]);
   }
 }
-await initialize();
-if(pool){
-  const pruneSms=()=>Promise.all([pool.query("DELETE FROM sms_requests WHERE created_at<now()-interval '2 days'"),pool.query("DELETE FROM phone_otps WHERE expires_at<now()")]).catch(()=>console.error('SMS cleanup failed'));
-  pruneSms();setInterval(pruneSms,3600000).unref();
-  const prune=()=>pool.query("DELETE FROM product_events WHERE id IN (SELECT id FROM product_events WHERE created_at<now()-interval '90 days' ORDER BY id LIMIT 5000)").catch(e=>console.error('Activity pruning:',e.message));
-  prune();setInterval(prune,60*60_000).unref();
-  const expire=async()=>{
-    try{
-      const {rows}=await pool.query("SELECT id FROM orders WHERE status='awaiting_payment' AND created_at<now()-interval '60 minutes' ORDER BY created_at LIMIT 30");
-      for(const {id} of rows){try{await cancelOrder(id,null);}catch(e){if(e.status!==409)console.error('Pending order expiration:',e.message);}}
-    }catch(e){console.error('Pending order expiration:',e.message);}
+
+function startBackgroundJobs() {
+  if (!pool) return [];
+  const timers = [];
+  const pruneSms = () => Promise.all([
+    pool.query("DELETE FROM sms_requests WHERE created_at<now()-interval '30 days'"),
+    pool.query("DELETE FROM phone_otps WHERE expires_at<now()"),
+    pool.query("DELETE FROM user_sessions WHERE expires_at<now() OR (revoked_at IS NOT NULL AND revoked_at<now()-interval '7 days')"),
+    pool.query("DELETE FROM auth_attempts WHERE created_at<now()-interval '7 days'")
+  ]).catch(() => console.error('Auth/SMS cleanup failed'));
+  pruneSms();
+  timers.push(setInterval(pruneSms, 3600_000).unref());
+  const prune = () => pool.query("DELETE FROM product_events WHERE id IN (SELECT id FROM product_events WHERE created_at<now()-interval '90 days' ORDER BY id LIMIT 5000)").catch(e => console.error('Activity pruning:', e.message));
+  prune();
+  timers.push(setInterval(prune, 60 * 60_000).unref());
+  const expire = async () => {
+    try {
+      const { rows } = await pool.query("SELECT id FROM orders WHERE status='awaiting_payment' AND created_at<now()-interval '60 minutes' ORDER BY created_at LIMIT 30");
+      for (const { id } of rows) {
+        try { await cancelOrder(id, null); } catch (e) { if (e.status !== 409) console.error('Pending order expiration:', e.message); }
+      }
+    } catch (e) { console.error('Pending order expiration:', e.message); }
   };
-  expire();setInterval(expire,5*60_000).unref();
+  expire();
+  timers.push(setInterval(expire, 5 * 60_000).unref());
+  return timers;
 }
-const server = app.listen(Number(process.env.PORT || 3000),'0.0.0.0',()=>console.log('Marketuz listening on port',server.address().port));
-process.on('SIGTERM',()=>server.close(()=>pool?.end()));
+
+return { app, pool, initialize, startBackgroundJobs };
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (isMain) {
+  const { app, pool, initialize, startBackgroundJobs } = createApp();
+  await initialize();
+  startBackgroundJobs();
+  const server = app.listen(Number(process.env.PORT || 3000), '0.0.0.0', () => console.log('Marketuz listening on port', server.address().port));
+  process.on('SIGTERM', () => server.close(() => pool?.end()));
+}

@@ -20,7 +20,9 @@ const paths = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
   lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
   filter: '<path d="M4 7h16M7 12h10M10 17h4"/>',
-  logout: '<path d="M10 4H4v16h6M15 8l4 4-4 4M8 12h11"/>'
+  logout: '<path d="M10 4H4v16h6M15 8l4 4-4 4M8 12h11"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff: '<path d="M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.9 5.1A10.7 10.7 0 0 1 12 5c6.5 0 10 7 10 7a18 18 0 0 1-3.4 4.5M6.6 6.6A17.7 17.7 0 0 0 2 12s3.5 7 10 7a10.4 10.4 0 0 0 5.4-1.5"/>'
 };
 const icon = name => { const custom=state.config?.site?.icons?.[name]; return custom&&safeImage(custom)?`<img class="ui-custom-icon" src="${safeImage(custom)}" alt="" aria-hidden="true">`:`<svg class="ui-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.sparkle}</svg>`; };
 const bagArtwork = () => state.config?.site?.icons?.bag?icon('bag'):'<img class="bag-artwork" src="/assets/bag-premium.webp" width="20" height="20" alt="" aria-hidden="true">';
@@ -181,6 +183,43 @@ function paymentChoices(products) {
   const info={click:['Karta bilan · Click','Click ilovasi shart emas. Karta faqat Click’ning xavfsiz oynasiga kiritiladi.'],payme:['Karta bilan · Payme','Karta Payme to‘lov sahifasiga kiritiladi.'],cod:['Yetkazilganda to‘lash','Buyurtmani hozir yuboring, to‘lov shartlari operator bilan kelishiladi.']};
   return `<fieldset class="payment-selector full"><legend>To‘lov usuli</legend><div class="payment-choice-grid">${available.map((method,i)=>`<label class="payment-choice"><input type="radio" name="paymentMethod" value="${method}" ${i===0?'checked':''} required><span class="payment-choice-body"><span class="payment-choice-icon">${icon(method==='cod'?'truck':'shield')}</span><span><strong>${info[method][0]}</strong><small>${info[method][1]}</small></span><span class="payment-choice-tick">✓</span></span></label>`).join('')}</div><p class="payment-disclaimer">Marketuz karta raqami, amal qilish muddati yoki CVV ni so‘ramaydi va saqlamaydi. To‘lov holati faqat provayder tasdig‘idan keyin yangilanadi.</p></fieldset>`;
 }
+function setAuthNext(path) {
+  const safe = typeof path === 'string' && /^\/(?!\/)/.test(path) ? path : '';
+  state.authNext = safe || null;
+  try { if (safe) sessionStorage.setItem('marketuz_auth_next', safe); else sessionStorage.removeItem('marketuz_auth_next'); } catch {}
+}
+function getAuthNext() {
+  if (state.authNext && /^\/(?!\/)/.test(state.authNext)) return state.authNext;
+  try { const v = sessionStorage.getItem('marketuz_auth_next') || ''; return /^\/(?!\/)/.test(v) ? v : null; } catch { return null; }
+}
+function formatUzPhoneInput(raw) {
+  let digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('998')) digits = digits.slice(0, 12);
+  else if (digits.length <= 9) digits = ('998' + digits).slice(0, 12);
+  else digits = digits.slice(0, 12);
+  const p = [digits.slice(0, 3), digits.slice(3, 5), digits.slice(5, 8), digits.slice(8, 10), digits.slice(10, 12)].filter(Boolean);
+  return '+' + p.join(' ');
+}
+function evalPasswordStrength(password) {
+  const s = String(password || '');
+  if (!s) return { score: 0, label: 'Kamida 10 ta belgi kiriting', cls: '' };
+  if (s.length < 10) return { score: 1, label: `Kamida 10 belgi (${s.length}/10)`, cls: 'weak' };
+  let score = 1;
+  if (s.length >= 12) score++;
+  if (/[a-z]/.test(s) && /[A-Z]/.test(s)) score++;
+  if (/\d/.test(s)) score++;
+  if (/[^A-Za-z0-9]/.test(s)) score++;
+  if (/^(.)\1+$/.test(s) || ['1234567890', 'password123', 'qwerty12345'].includes(s.toLowerCase())) {
+    return { score: 1, label: 'Juda oddiy parol — murakkabroq tanlang', cls: 'weak' };
+  }
+  if (score >= 4) return { score: 4, label: 'Kuchli parol', cls: 'strong' };
+  if (score >= 3) return { score: 3, label: 'Yaxshi parol', cls: 'good' };
+  return { score: 2, label: 'O‘rtacha parol (raqam yoki belgi qo‘shing)', cls: 'medium' };
+}
+const passwordField = (name, label, opts = {}) => `<label class="field ${opts.full ? 'full' : ''}">${label}<span class="password-field"><input name="${name}" type="password" autocomplete="${opts.autocomplete || 'current-password'}" ${opts.required === false ? '' : 'required'} minlength="${opts.minlength || 1}" maxlength="128" placeholder="${esc(opts.placeholder || '')}" ${opts.strength ? 'data-strength-input="true"' : ''}><button type="button" class="password-toggle" data-action="toggle-password" aria-label="Parolni ko‘rsatish" aria-pressed="false">${icon('eye')}</button></span>${opts.strength ? '<span class="strength-meter" data-strength-meter><i class="strength-bar"></i><small>Kamida 10 ta belgi kiriting</small></span>' : ''}</label>`;
+const defaultAuthMode = () => state.config?.smsEnabled ? 'phone-login' : 'login';
+
 async function renderCheckout() {
   updateTitle('Buyurtma'); const products=await loadCart();
   const fingerprint=JSON.stringify(state.cart);
@@ -188,12 +227,12 @@ async function renderCheckout() {
   if(savedKey?.fingerprint===fingerprint&&typeof savedKey.key==='string')state.checkoutKey=savedKey.key;
   else{state.checkoutKey=crypto.randomUUID();saveLocal('marketuz_checkout_key',{key:state.checkoutKey,fingerprint});}
   if(!products.length) return `${crumbs(['Buyurtma'])}<div class="page-heading"><h1>Buyurtma</h1></div>${empty('Savat bo‘sh','Buyurtma berish uchun mahsulot tanlang.','Katalogga o‘tish','/catalog')}`;
-  if(!state.user) { state.authNext='/checkout'; return `${crumbs(['Buyurtma'])}<div class="page-heading"><h1>Davom etish uchun kiring</h1></div>${renderAuth('login',true)}`; }
-  return `${crumbs(['Savat','/cart'],['Buyurtma'])}<div class="page-heading"><span class="eyebrow">Yakunlash</span><h1>Buyurtma ma’lumotlari</h1><p>Manzilingizni to‘ldiring. ${state.config.shipping==='included'?'Yetkazish mahsulot narxiga kiritilgan.':'Yetkazish narxi va imkoniyati operator tomonidan alohida tasdiqlanadi.'}</p></div><div class="checkout-layout"><form class="form-card" data-form="checkout"><h2>Qabul qiluvchi</h2><div class="form-grid"><label class="field">Ism va familiya<input name="recipient" value="${esc(state.user.full_name)}" maxlength="120" required></label><label class="field">Telefon raqami<input name="phone" type="tel" value="${esc(state.user.phone||'')}" placeholder="+998 90 123 45 67" required></label><label class="field">Viloyat / shahar<select name="region" required><option value="">Hududni tanlang</option>${state.config.regions.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select></label><label class="field">Tuman / shahar<input name="district" placeholder="Masalan, Kasbi tumani" required maxlength="100"></label><label class="field full">To‘liq manzil<input name="address" placeholder="Ko‘cha, uy, xonadon va mo‘ljal" required maxlength="300"></label><label class="field full">Izoh (ixtiyoriy)<textarea name="note" maxlength="500" placeholder="Yetkazuvchi uchun qo‘shimcha ma’lumot"></textarea></label>${paymentChoices(products)}<div class="hint-box full">${icon('truck')} ${state.config.shipping==='included'?'Yetkazish mahsulot narxiga kiritilgan.':'Yetkazish xizmati va narxi manzil tasdiqlangach belgilanadi.'} UzPost jo‘natmasi hozir avtomatik yaratilmaydi.${products.some(p=>p.stock_mode==='replenishable')?' Buyurtma asosidagi mahsulotlar mavjudligi operator bilan tasdiqlanadi.':''}</div><div class="field full"><label class="checkbox-row"><input type="checkbox" required name="agree"> Buyurtma shartlari, <a href="/terms" data-link>foydalanish shartlari</a> va <a href="/privacy" data-link>maxfiylik siyosati</a> bilan tanishganimni tasdiqlayman.</label></div><button class="btn btn-primary full" type="submit">Buyurtmani yuborish</button></div></form>${summary(products,true)}</div>`;
+  if(!state.user) { setAuthNext('/checkout'); return `${crumbs(['Buyurtma'])}<div class="page-heading"><h1>Davom etish uchun kiring</h1><p>Kirish yoki ro‘yxatdan o‘tishdan so‘ng savatingiz va buyurtma sahifasiga qaytasiz.</p></div>${renderAuth(defaultAuthMode(),true)}`; }
+  return `${crumbs(['Savat','/cart'],['Buyurtma'])}<div class="page-heading"><span class="eyebrow">Yakunlash</span><h1>Buyurtma ma’lumotlari</h1><p>Manzilingizni to‘ldiring. ${state.config.shipping==='included'?'Yetkazish mahsulot narxiga kiritilgan.':'Yetkazish narxi va imkoniyati operator tomonidan alohida tasdiqlanadi.'}</p></div><div class="checkout-layout"><form class="form-card" data-form="checkout"><h2>Qabul qiluvchi</h2><div class="form-grid"><label class="field">Ism va familiya<input name="recipient" value="${esc(state.user.full_name)}" maxlength="120" required></label><label class="field">Telefon raqami<input name="phone" type="tel" data-phone-format="true" value="${esc(formatUzPhoneInput(state.user.verified_phone||state.user.phone||''))}" placeholder="+998 90 123 45 67" required></label><label class="field">Viloyat / shahar<select name="region" required><option value="">Hududni tanlang</option>${state.config.regions.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select></label><label class="field">Tuman / shahar<input name="district" placeholder="Masalan, Kasbi tumani" required maxlength="100"></label><label class="field full">To‘liq manzil<input name="address" placeholder="Ko‘cha, uy, xonadon va mo‘ljal" required maxlength="300"></label><label class="field full">Izoh (ixtiyoriy)<textarea name="note" maxlength="500" placeholder="Yetkazuvchi uchun qo‘shimcha ma’lumot"></textarea></label>${paymentChoices(products)}<div class="hint-box full">${icon('truck')} ${state.config.shipping==='included'?'Yetkazish mahsulot narxiga kiritilgan.':'Yetkazish xizmati va narxi manzil tasdiqlangach belgilanadi.'} UzPost jo‘natmasi hozir avtomatik yaratilmaydi.${products.some(p=>p.stock_mode==='replenishable')?' Buyurtma asosidagi mahsulotlar mavjudligi operator bilan tasdiqlanadi.':''}</div><div class="field full"><label class="checkbox-row"><input type="checkbox" required name="agree"> Buyurtma shartlari, <a href="/terms" data-link>foydalanish shartlari</a> va <a href="/privacy" data-link>maxfiylik siyosati</a> bilan tanishganimni tasdiqlayman.</label></div><button class="btn btn-primary full" type="submit">Buyurtmani yuborish</button></div></form>${summary(products,true)}</div>`;
 }
 async function renderPayment(id) {
   updateTitle('To‘lov');
-  if(!state.user){state.authNext='/pay/'+id;return `${crumbs(['To‘lov'])}${renderAuth('login',true)}`;}
+  if(!state.user){setAuthNext('/pay/'+id);return `${crumbs(['To‘lov'])}${renderAuth(defaultAuthMode(),true)}`;}
   const p=await api('/orders/'+encodeURIComponent(id)+'/payment');
   state.payment=p;
   const paid=p.paymentStatus==='paid',pending=p.status==='awaiting_payment'&&!!p.paymentUrl;
@@ -201,8 +240,14 @@ async function renderPayment(id) {
 }
 function renderAuth(mode='login',embedded=false) {
   const register=mode==='register'||mode==='phone-register';
-  const phone=mode.startsWith('phone-'); updateTitle(register?'Ro‘yxatdan o‘tish':'Kirish');
-  return `${embedded?'':crumbs(['Kirish'])}<div class="auth-shell"><div class="auth-art"><div><span class="eyebrow eyebrow-light">Marketuz oilasi</span><h2>Yangi topilmalar shu yerdan boshlanadi.</h2><p>Sevimli mahsulotlaringiz, buyurtmalar va sotuvchi markazi bitta joyda.</p></div></div><form class="auth-form" data-form="${phone?(register?'phone-register':'phone-login'):(register?'register':'login')}"><span class="eyebrow">Xush kelibsiz</span><h1>${register?'Hisob ochish':'Hisobga kirish'}</h1><p>${register?'Xaridlaringizni qulay boshqarish uchun hisob yarating.':'Davom etish uchun ma’lumotlaringizni kiriting.'}</p>${register?'<label class="field">Ism va familiya<input name="name" autocomplete="name" required minlength="2" maxlength="100"></label>':''}${phone?`<label class="field">Telefon raqami<input type="tel" name="phone" autocomplete="tel" inputmode="tel" required maxlength="25" placeholder="+998 90 123 45 67"></label>${register?`<button class="btn" type="button" data-action="send-sms">SMS kod olish</button><p aria-live="polite" data-sms-status></p><label class="field">SMS kod<input name="code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="6 xonali kod"></label>`:''}`:'<label class="field">Email manzil<input type="email" name="email" autocomplete="email" required maxlength="200" placeholder="name@example.com"></label>'}<label class="field">Parol<input type="password" name="password" autocomplete="${register?'new-password':'current-password'}" required minlength="${register?10:1}" placeholder="${register?'Kamida 10 ta belgi':'Parolingiz'}"></label>${register?'<label class="checkbox-row"><input name="agree" type="checkbox" required> <span><a href="/terms" data-link>Foydalanish shartlari</a> va <a href="/privacy" data-link>maxfiylik siyosati</a> bilan tanishdim.</span></label>':''}<button class="btn btn-primary" type="submit">${register?'Ro‘yxatdan o‘tish':'Kirish'}</button><div class="auth-switch">${register?'Hisobingiz bormi?':'Hali hisobingiz yo‘qmi?'} <button type="button" data-action="auth-mode" data-mode="${phone?(register?'phone-login':'phone-register'):(register?'login':'register')}">${register?'Kirish':'Ro‘yxatdan o‘tish'}</button></div><div class="auth-switch"><button type="button" data-action="auth-mode" data-mode="${phone?(register?'register':'login'):'phone-login'}">${phone?'Email orqali davom etish':'Telefon orqali kirish'}</button>${!phone&&state.config.smsEnabled?'<button type="button" data-action="auth-mode" data-mode="phone-register">Telefon bilan hisob ochish</button>':''}</div>${phone&&register&&!state.config.smsEnabled?'<p>SMS xizmati hozircha mavjud emas. Email orqali hisob ochishingiz mumkin.</p>':''}</form></div>`;
+  const reset=mode==='phone-reset';
+  const phone=mode.startsWith('phone-');
+  const title=reset?'Parolni tiklash':register?'Ro‘yxatdan o‘tish':'Kirish';
+  updateTitle(title);
+  const heading=reset?'Parolni tiklash':register?'Hisob ochish':'Hisobga kirish';
+  const sub=reset?'Tasdiqlangan telefon raqamingizga 6 xonali SMS kod yuboriladi.':register?'Xaridlaringizni qulay boshqarish uchun hisob yarating.':'Davom etish uchun ma’lumotlaringizni kiriting.';
+  const formKind=reset?'phone-reset':phone?(register?'phone-register':'phone-login'):(register?'register':'login');
+  return `${embedded?'':crumbs([title])}<div class="auth-shell"><div class="auth-art"><div><span class="eyebrow eyebrow-light">Marketuz oilasi</span><h2>Yangi topilmalar shu yerdan boshlanadi.</h2><p>Sevimli mahsulotlaringiz, buyurtmalar va sotuvchi markazi bitta joyda.</p></div></div><form class="auth-form" data-form="${formKind}"><span class="eyebrow">Xush kelibsiz</span><h1>${heading}</h1><p>${sub}</p>${register?'<label class="field">Ism va familiya<input name="name" autocomplete="name" required minlength="2" maxlength="100" placeholder="Ismingiz"></label>':''}${phone?`<label class="field">Telefon raqami<input type="tel" name="phone" data-phone-format="true" autocomplete="tel" inputmode="tel" required maxlength="25" placeholder="+998 90 123 45 67"></label>${(register||reset)?`<div class="sms-action-row"><button class="btn btn-outline" type="button" data-action="send-sms" data-purpose="${reset?'reset':'register'}">SMS kod olish</button></div><p class="sms-status" aria-live="polite" data-sms-status></p><label class="field">SMS tasdiqlash kodi<input name="code" data-otp-input="true" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="6 xonali kod"></label>`:''}`:'<label class="field">Email manzil<input type="email" name="email" autocomplete="email" required maxlength="200" placeholder="name@example.com"></label>'}${passwordField(reset?'newPassword':'password',reset?'Yangi parol':'Parol',{autocomplete:(register||reset)?'new-password':'current-password',minlength:(register||reset)?10:1,placeholder:(register||reset)?'Kamida 10 ta belgi':'Parolingiz',strength:register||reset})}${mode==='login'?'<div id="admin-2fa-box" class="auth-2fa-box" hidden><p class="summary-note">Administrator hisobi uchun autentifikator ilovasidagi 6 xonali kodni kiriting.</p><label class="field">2FA tasdiqlash kodi<input name="totpCode" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 xonali TOTP kod"></label><input type="hidden" name="challengeToken" value=""></div>':''}${register?'<label class="checkbox-row"><input name="agree" type="checkbox" required> <span><a href="/terms" data-link>Foydalanish shartlari</a> va <a href="/privacy" data-link>maxfiylik siyosati</a> bilan tanishdim.</span></label>':''}<button class="btn btn-primary" type="submit">${reset?'Parolni yangilash':register?'Ro‘yxatdan o‘tish':'Kirish'}</button><div class="auth-links-row">${mode==='phone-login'&&state.config.smsEnabled?'<button type="button" data-action="auth-mode" data-mode="phone-reset">Parolni unutdingizmi?</button>':''}<button type="button" data-action="auth-mode" data-mode="${reset?'phone-login':phone?(register?'phone-login':'phone-register'):(register?'login':'register')}">${reset?'Kirishga qaytish':register?'Hisobingiz bormi? Kirish':'Ro‘yxatdan o‘tish'}</button></div><div class="auth-switch"><button type="button" data-action="auth-mode" data-mode="${phone?(register?'register':'login'):'phone-login'}">${phone?'Email orqali kirish (eski hisob / admin)':'Telefon raqami orqali kirish'}</button>${!phone&&state.config.smsEnabled?'<button type="button" data-action="auth-mode" data-mode="phone-register">Telefon bilan hisob ochish</button>':''}</div>${phone&&(register||reset)&&!state.config.smsEnabled?'<p class="summary-note">SMS xizmati hozircha faol emas. Email orqali kirishingiz yoki hisob ochishingiz mumkin.</p>':''}</form></div>`;
 }
 async function renderFavorites() {
   updateTitle('Sevimlilar'); let products=[];
@@ -211,12 +256,24 @@ async function renderFavorites() {
 }
 const profileAvatar=(url,name)=>safeImage(url)?img(url,name,'class="profile-avatar"'):`<span class="profile-avatar profile-initial">${esc((name||'M')[0].toUpperCase())}</span>`;
 async function renderAccount() {
-  if(!state.user)return renderAuth((['register','phone-register','phone-login'].includes(new URLSearchParams(location.search).get('mode'))?new URLSearchParams(location.search).get('mode'):(state.config.smsEnabled?'phone-login':'login')));
+  const modeParam=new URLSearchParams(location.search).get('mode');
+  if(!state.user)return renderAuth((['register','phone-register','phone-login','phone-reset'].includes(modeParam)?modeParam:(state.config.smsEnabled?'phone-login':'login')));
   updateTitle('Profil');const tab=new URLSearchParams(location.search).get('tab')||'profile',u=state.user;
   let content='';
   if(tab==='orders') {const {orders}=await api('/orders');content=orders.length?orders.map(o=>`<article class="order-card"><div class="order-head"><div><strong>Buyurtma #${esc(o.id.slice(0,8).toUpperCase())}</strong><small>${dateText(o.created_at)} · ${esc(o.region)}, ${esc(o.district)}</small></div><span class="status ${esc(o.status)}">${esc(labelStatus[o.status]||o.status)}</span></div><div class="order-items">${o.items.map(i=>img(i.image_url,i.title,`title="${esc(i.title)}"`)).join('')}</div><div class="profile-row"><span>Mahsulotlar jami</span><strong>${money(o.subtotal)}</strong></div>${o.tracking_number?`<p class="summary-note">Kuzatuv raqami: <strong>${esc(o.tracking_number)}</strong></p>`:''}${o.shipment_events?.length?`<ol class="shipment-timeline">${o.shipment_events.map(e=>`<li><strong>${esc(labelStatus[e.status]||e.status)}</strong><small>${dateText(e.occurred_at)} · ${e.source==='uzpost'?'UzPost':'Marketuz'}</small></li>`).join('')}</ol>`:''}<p class="summary-note">Yetkazish narxi: ${state.config.shipping==='included'?'mahsulot narxiga kiritilgan':'operator tomonidan aniqlanadi'}.</p>${o.status==='awaiting_payment'?`<button data-action="resume-payment" data-id="${esc(o.id)}" class="small-btn">To‘lovni davom ettirish</button>`:''}${o.payment_status!=='paid'&&['awaiting_payment','new','accepted','packing'].includes(o.status)?`<button data-action="cancel-order" data-id="${esc(o.id)}" class="small-btn reject">Buyurtmani bekor qilish</button>`:''}</article>`).join(''):empty('Buyurtmalar yo‘q','Birinchi topilmangiz sizni kutmoqda.','Katalogga o‘tish','/catalog','box');}
-  else if(tab==='security')content=`<div class="profile-card"><h2>Parolni yangilash</h2><form data-form="password" class="form-grid"><label class="field full">Joriy parol<input name="currentPassword" type="password" required></label><label class="field full">Yangi parol<input name="newPassword" type="password" minlength="10" required></label><button class="btn btn-primary" type="submit">Parolni saqlash</button></form></div>`;
-  else if(tab==='edit')content=`<div class="profile-card"><h2>Profilni bezash</h2><p>Surat va foningizni qurilmadan yuklang yoki HTTPS havolasini kiriting. Xaridor profili faqat o‘zingizga ko‘rinadi; sotuvchi do‘koni ommaga ochiq.</p><form data-form="profile" class="form-grid"><label class="field">Ism va familiya<input name="name" value="${esc(u.full_name)}" required maxlength="100"></label><label class="field">Telefon<input name="phone" type="tel" value="${esc(u.phone||'')}" placeholder="+998 ..."></label><label class="field full">Bio<textarea name="bio" maxlength="300" placeholder="Do‘koningiz yoki didingiz haqida...">${esc(u.bio||'')}</textarea></label><label class="field full">Avatar<span class="asset-field"><input name="avatarUrl" data-setting="profile.avatarUrl" value="${esc(u.avatar_url||'')}" placeholder="https://... yoki rasm yuklang"><button type="button" data-action="upload-asset" data-target="profile.avatarUrl">Rasm yuklash</button><img src="${safeImage(u.avatar_url)}" alt="Avatar" ${u.avatar_url?'':'hidden'}></span></label><label class="field full">Profil fon rasmi<span class="asset-field"><input name="coverUrl" data-setting="profile.coverUrl" value="${esc(u.cover_url||'')}" placeholder="https://... yoki rasm yuklang"><button type="button" data-action="upload-asset" data-target="profile.coverUrl">Rasm yuklash</button><img src="${safeImage(u.cover_url)}" alt="Fon" ${u.cover_url?'':'hidden'}></span></label><label class="field full">Email<input value="${esc(u.email)}" disabled></label><button class="btn btn-primary" type="submit">Profilni saqlash</button></form></div>`;
+  else if(tab==='security'){
+    const {sessions}=await api('/me/sessions');
+    const phoneSection=u.role==='admin'?'':`<div class="profile-card"><h2>Tasdiqlangan telefon raqami</h2>${u.verified_phone?`<p class="summary-note">Kirish uchun bog‘langan raqam: <strong>${esc(formatUzPhoneInput(u.verified_phone))}</strong></p>${state.config.smsEnabled?`<form data-form="me-phone" data-purpose="change_phone" class="form-grid"><label class="field">Yangi telefon raqami<input name="phone" type="tel" data-phone-format="true" placeholder="+998 90 123 45 67" required></label>${passwordField('currentPassword','Joriy parol',{required:!u.telegram_id})}<div class="field full sms-action-row"><button type="button" class="btn btn-outline" data-action="send-me-sms" data-purpose="change_phone">Yangi raqamga SMS kod olish</button></div><p class="sms-status field full" aria-live="polite" data-sms-status></p><label class="field full">SMS tasdiqlash kodi<input name="code" data-otp-input="true" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="6 xonali kod"></label><button class="btn btn-primary full" type="submit">Telefon raqamini almashtirish</button></form>`:'<p class="summary-note">Raqamni almashtirish uchun SMS xizmati yoqilgan bo‘lishi kerak.</p>'}`:`<p class="summary-note">Hisobingizga hali tasdiqlangan telefon raqami bog‘lanmagan.</p>${state.config.smsEnabled?`<form data-form="me-phone" data-purpose="bind" class="form-grid"><label class="field full">Telefon raqami<input name="phone" type="tel" data-phone-format="true" placeholder="+998 90 123 45 67" required></label><div class="field full sms-action-row"><button type="button" class="btn btn-outline" data-action="send-me-sms" data-purpose="bind">SMS kod olish</button></div><p class="sms-status field full" aria-live="polite" data-sms-status></p><label class="field full">SMS tasdiqlash kodi<input name="code" data-otp-input="true" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="6 xonali kod"></label><button class="btn btn-primary full" type="submit">Telefon raqamini bog‘lash</button></form>`:'<p class="summary-note">SMS xizmati hozircha faol emas.</p>'}`}</div>`;
+    const admin2faSection=u.role!=='admin'?'':`<div class="profile-card"><h2>Administrator 2FA himoyasi (TOTP)</h2><p class="summary-note">Holati: <strong>${u.totp_enabled?'Yoqilgan ✓':'O‘chirilgan'}</strong>. Autentifikator ilovasi orqali qo‘shimcha himoya.</p>${u.totp_enabled?`<form data-form="admin-2fa-disable" class="form-grid">${passwordField('currentPassword','Joriy parol')}<label class="field">Autentifikator kodi<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="6 xonali kod"></label><button class="btn btn-outline full" type="submit">2FA ni o‘chirish</button></form>`:`<button type="button" class="btn btn-outline" data-action="admin-2fa-setup">2FA sozlashni boshlash</button><div id="admin-2fa-setup-box" hidden><p class="summary-note">Quyidagi kalitni Google Authenticator yoki 1Password ilovasiga kiriting:</p><code id="admin-2fa-secret" class="totp-secret"></code><form data-form="admin-2fa-enable" class="form-grid">${passwordField('currentPassword','Joriy parol')}<label class="field">Tasdiqlash kodi<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required placeholder="6 xonali kod"></label><button class="btn btn-primary full" type="submit">2FA ni faollashtirish</button></form></div>`}</div>`;
+    const sessionsSection=`<div class="profile-card"><h2>Faol sessiyalar va qurilmalar</h2><p class="summary-note">Hisobingiz ochiq turgan qurilmalarni boshqaring.</p><div class="session-list">${sessions.map(s=>`<div class="session-item"><div><strong>${esc(s.device_label||'Qurilma')} ${s.current?'<span class="status active">Joriy</span>':''}</strong><small>IP: ${esc(s.ip||'—')} · Oxirgi faollik: ${dateText(s.last_active_at)}</small></div>${s.current?'':`<button type="button" class="small-btn reject" data-action="revoke-session" data-id="${esc(s.id)}">Chiqish</button>`}</div>`).join('')}</div><div class="session-actions"><button type="button" class="small-btn" data-action="refresh-session">Sessiyani yangilash</button><button type="button" class="small-btn" data-action="logout-others">Boshqa qurilmalardan chiqish</button><button type="button" class="small-btn reject" data-action="logout-all">Barcha qurilmalardan chiqish</button></div></div>`;
+    const deleteSection=u.role==='admin'?'':`<div class="profile-card danger-card"><h2>Hisobni o‘chirish</h2><p class="summary-note">Hisob o‘chirilganda shaxsiy ma’lumotlaringiz tozalanadi va barcha sessiyalar yopiladi. Faol buyurtmalar tugamaguncha hisob o‘chirilmaydi.</p><form data-form="delete-account" class="form-grid">${u.telegram_id?'<label class="field full">Tasdiqlash uchun O‘CHIRISH so‘zini yozing<input name="confirm" required placeholder="O‘CHIRISH"></label>':passwordField('currentPassword','Tasdiqlash uchun joriy parolingiz',{full:true})}<button class="small-btn reject" type="submit">Hisobni butunlay o‘chirish</button></form></div>`;
+    content=`<div class="security-stack">${phoneSection}<div class="profile-card"><h2>Parolni yangilash</h2><p class="summary-note">Parol o‘zgarganda boshqa qurilmalardagi barcha sessiyalar avtomatik yopiladi.</p><form data-form="password" class="form-grid">${passwordField('currentPassword','Joriy parol',{full:true})}${passwordField('newPassword','Yangi parol',{full:true,autocomplete:'new-password',minlength:10,placeholder:'Kamida 10 ta belgi',strength:true})}<button class="btn btn-primary" type="submit">Parolni saqlash</button></form></div>${admin2faSection}${sessionsSection}${deleteSection}</div>`;
+  }
+  else if(tab==='edit'){
+    const internalAccount=u.email?.endsWith('@marketuz.invalid');
+    const identityLabel=u.verified_phone?formatUzPhoneInput(u.verified_phone):(u.telegram_id?'Telegram orqali ulangan hisob':'Telefon orqali hisob');
+    content=`<div class="profile-card"><h2>Profilni bezash</h2><p>Surat va foningizni qurilmadan yuklang yoki HTTPS havolasini kiriting. Xaridor profili faqat o‘zingizga ko‘rinadi; sotuvchi do‘koni ommaga ochiq.</p><form data-form="profile" class="form-grid"><label class="field">Ism va familiya<input name="name" value="${esc(u.full_name)}" required maxlength="100"></label><label class="field">Aloqa telefoni<input name="phone" type="tel" data-phone-format="true" value="${esc(formatUzPhoneInput(u.phone||'')||u.phone||'')}" placeholder="+998 90 123 45 67"></label><label class="field full">Bio<textarea name="bio" maxlength="300" placeholder="Do‘koningiz yoki didingiz haqida...">${esc(u.bio||'')}</textarea></label><label class="field full">Avatar<span class="asset-field"><input name="avatarUrl" data-setting="profile.avatarUrl" value="${esc(u.avatar_url||'')}" placeholder="https://... yoki rasm yuklang"><button type="button" data-action="upload-asset" data-target="profile.avatarUrl">Rasm yuklash</button><img src="${safeImage(u.avatar_url)}" alt="Avatar" ${u.avatar_url?'':'hidden'}></span></label><label class="field full">Profil fon rasmi<span class="asset-field"><input name="coverUrl" data-setting="profile.coverUrl" value="${esc(u.cover_url||'')}" placeholder="https://... yoki rasm yuklang"><button type="button" data-action="upload-asset" data-target="profile.coverUrl">Rasm yuklash</button><img src="${safeImage(u.cover_url)}" alt="Fon" ${u.cover_url?'':'hidden'}></span></label><label class="field full">${internalAccount?'Kirish hisobi':'Email'}<input value="${esc(internalAccount?identityLabel:u.email)}" disabled></label><button class="btn btn-primary" type="submit">Profilni saqlash</button></form></div>`;
+  }
   else if(tab==='preferences')content=`<div class="profile-card"><span class="eyebrow">O‘zingiz tanlaysiz</span><h2>Shaxsiy tavsiyalar</h2><p>Yoqilganda qidirgan so‘zlaringiz, ko‘rgan mahsulotlaringiz, sahifada qolgan vaqtingiz va savatga qo‘shishlar 90 kungacha tavsiyalar uchun saqlanadi. O‘chirilganda yig‘ilgan faoliyat tarixi o‘chadi. Sevimlilar va buyurtmalar o‘zgarmaydi.</p><div class="preference-switch"><div><strong>Qiziqishimga mos tanlovlar</strong><small>${u.personalization_enabled?'Yoqilgan · sizga mos mahsulotlar tanlanadi':'O‘chirilgan · umumiy ommabop tanlovlar ko‘rinadi'}</small></div><button class="btn ${u.personalization_enabled?'btn-outline':'btn-primary'}" data-action="personalization" data-enabled="${u.personalization_enabled?'false':'true'}">${u.personalization_enabled?'O‘chirish':'Yoqish'}</button></div><button class="small-btn reject" data-action="clear-activity">Tavsiya tarixini tozalash</button><p class="summary-note">Faoliyat tarixi faqat sizga tavsiya tuzish uchun ishlatiladi. <a href="/privacy" data-link>Maxfiylik siyosati</a></p></div>`;
   else if(tab==='following'){const {sellers}=await api('/me/follows');content=`<section class="profile-card"><h2>Kuzatayotgan do‘konlar</h2>${sellers.length?`<div class="follow-list">${sellers.map(x=>`<a href="/shop/${x.id}" data-link class="follow-item">${profileAvatar(x.avatar_url,x.full_name)}<span><strong>${esc(x.full_name)}</strong><small>${x.product_count} ta mahsulot · ${esc(x.bio||'Marketuz sotuvchisi')}</small></span><span>→</span></a>`).join('')}</div>`:empty('Hozircha kuzatayotgan do‘kon yo‘q','Mahsulot sahifasidan sotuvchi do‘koniga o‘ting.','Katalogga o‘tish','/catalog','store')}</section>`;}
   else if(tab==='saved'){const {products}=await api('/favorites');content=`<section class="section">${sectionHead('Saqlanganlar','Sevimli topilmalaringiz')} ${products.length?`<div class="products-grid">${products.map(productCard).join('')}</div>`:empty('Hozircha saqlanmagan','Mahsulot kartasidagi yurakchani bosing.','Katalogga o‘tish','/catalog','heart')}</section>`;}
@@ -351,39 +408,104 @@ async function submitForm(form) {
   const kind=form.dataset.form, v=formValues(form), btn=form.querySelector('button[type="submit"]'); if(btn) btn.disabled=true;
   try {
     if(['login','register','phone-login','phone-register'].includes(kind)) {
-      const payload=kind==='phone-register'?{name:v.name,phone:v.phone,code:v.code,password:v.password,agree:!!v.agree}:kind==='phone-login'?{phone:v.phone,password:v.password}:kind==='register'?{ name:v.name,email:v.email,password:v.password,agree:!!v.agree }:{email:v.email,password:v.password};
-      const {user}=await api('/auth/'+(kind.startsWith('phone-')?'phone/'+kind.slice(6):kind),{method:'POST',body:JSON.stringify(payload)}); state.user=user;
-      if(user.role==='admin'||user.role==='seller') { /* role navigation is available in the menu */ }
+      if(kind==='login' && v.challengeToken){
+        const {user}=await api('/auth/login/2fa',{method:'POST',body:JSON.stringify({challengeToken:v.challengeToken,code:v.totpCode})});
+        state.user=user;
+      } else {
+        const payload=kind==='phone-register'?{name:v.name,phone:v.phone,code:v.code,password:v.password,agree:!!v.agree}:kind==='phone-login'?{phone:v.phone,password:v.password}:kind==='register'?{ name:v.name,email:v.email,password:v.password,agree:!!v.agree }:{email:v.email,password:v.password};
+        const resp=await api('/auth/'+(kind.startsWith('phone-')?'phone/'+kind.slice(6):kind),{method:'POST',body:JSON.stringify(payload)});
+        if(resp.requires2fa){
+          const box=$('#admin-2fa-box');if(box){box.hidden=false;form.elements.challengeToken.value=resp.challengeToken;form.elements.totpCode.required=true;form.elements.totpCode.focus();}
+          notify('Autentifikator ilovasidagi 2FA kodni kiriting.');
+          return;
+        }
+        state.user=resp.user;
+      }
       try { const f=await api('/favorites'); state.favorites=new Set(f.products.map(p=>String(p.id))); } catch {}
-      notify('Xush kelibsiz!'); nav(state.authNext||'/account'); state.authNext=null;
+      notify('Xush kelibsiz!');
+      const next=getAuthNext()||'/account';setAuthNext(null);nav(next);
+    } else if(kind==='phone-reset') {
+      const resp=await api('/auth/phone/reset-password',{method:'POST',body:JSON.stringify({phone:v.phone,code:v.code,newPassword:v.newPassword})});
+      notify(resp.message||'Parol yangilandi.');
+      nav('/account?mode=phone-login');
+    } else if(kind==='me-phone') {
+      const resp=await api('/me/phone/verify',{method:'POST',body:JSON.stringify({phone:v.phone,code:v.code,purpose:form.dataset.purpose||'bind'})});
+      state.user=resp.user;notify('Telefon raqami tasdiqlandi.');render();
+    } else if(kind==='admin-2fa-enable') {
+      await api('/admin/security/2fa/enable',{method:'POST',body:JSON.stringify({currentPassword:v.currentPassword,code:v.code})});
+      state.user.totp_enabled=true;notify('2FA himoyasi yoqildi.');render();
+    } else if(kind==='admin-2fa-disable') {
+      await api('/admin/security/2fa/disable',{method:'POST',body:JSON.stringify({currentPassword:v.currentPassword,code:v.code})});
+      state.user.totp_enabled=false;notify('2FA o‘chirildi.');render();
+    } else if(kind==='delete-account') {
+      if(!confirm('Hisobingizni butunlay o‘chirishni tasdiqlaysizmi?')) return;
+      await api('/me/delete',{method:'POST',body:JSON.stringify(v)});
+      state.user=null;state.favorites=new Set();saveLocal('marketuz_favorites',[]);notify('Hisobingiz o‘chirildi.');nav('/');
     } else if(kind==='checkout') {
       const products=await loadCart();
       const order=await api('/orders',{method:'POST',body:JSON.stringify({ ...v, checkoutKey:state.checkoutKey,items:products.map(x=>({id:x.id,variantId:x.variantId,qty:x.qty})) })});
       state.checkoutKey=null;try{localStorage.removeItem('marketuz_checkout_key');}catch{}state.cart=[];saveLocal('marketuz_cart',state.cart);notify(order.message);nav(order.paymentUrl?'/pay/'+order.id:'/account?tab=orders');
     } else if(kind==='profile') { const {user}=await api('/me',{method:'PATCH',body:JSON.stringify(v)}); state.user=user; notify('Profil saqlandi.'); render(); }
-    else if(kind==='password') { await api('/me/password',{method:'POST',body:JSON.stringify(v)}); form.reset(); notify('Parol yangilandi.'); }
+    else if(kind==='password') { const r=await api('/me/password',{method:'POST',body:JSON.stringify(v)}); form.reset(); notify(r.message||'Parol yangilandi.'); render(); }
     else if(kind==='admin-order') { await api('/admin/orders/'+form.dataset.id,{method:'PATCH',body:JSON.stringify(v)}); notify('Buyurtma holati saqlandi.'); render(); }
     else if(kind==='studio-product') { const payload=MarketuzStudio.collect(form),role=form.dataset.role,id=form.dataset.editId;await api('/'+role+'/products'+(id?'/'+id+(role==='admin'?'/details':''):''),{method:id?'PATCH':'POST',body:JSON.stringify(payload)});notify(role==='seller'?'Mahsulot tekshiruvga yuborildi.':'Mahsulot saqlandi.');nav('/'+role+'?tab=products'); }
     else if(kind==='studio-subcategory'){await api('/admin/subcategories',{method:'POST',body:JSON.stringify(v)});notify('Quyi kategoriya qo‘shildi.');render();}
     else if(kind==='site-settings') { const next=MarketuzCMS.collect(form,state.admin.settings.site); const result=await api('/admin/settings',{method:'PATCH',body:JSON.stringify(next)}); state.config.site=result.site;state.config.categories=result.site.categories;state.config.seasonal=result.seasonal;applySite();notify('Sayt sozlamalari saqlandi.');render(); }
   } catch(e) { notify(e.message,true); } finally { if(btn) btn.disabled=false; }
 }
+function startSmsTimer(button, seconds = 60, resetText = 'SMS kodni qayta yuborish') {
+  const until = Date.now() + Number(seconds || 60) * 1000;
+  const timer = setInterval(() => {
+    if (!button.isConnected) { clearInterval(timer); return; }
+    const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    button.textContent = left ? `Qayta yuborish (${left} s)` : resetText;
+    if (!left) { clearInterval(timer); button.disabled = false; }
+  }, 250);
+}
+function listenWebOtp(input) {
+  if (!('OTPCredential' in window) || !navigator.credentials?.get) return;
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 120_000);
+  navigator.credentials.get({ otp: { transport: ['sms'] }, signal: ac.signal })
+    .then(otp => { if (otp?.code && input?.isConnected) input.value = String(otp.code).replace(/\D/g, '').slice(0, 6); })
+    .catch(() => {});
+}
 async function actionOf(button) {
   const action=button.dataset.action,id=button.dataset.id;
   if(action==='menu') return openMenu(); if(action==='menu-close') return closeMenu();
-  if(action==='send-sms'){
+  if(action==='toggle-password'){
+    const wrap=button.closest('.password-field'),input=wrap?.querySelector('input');if(!input)return;
+    const show=input.type==='password';input.type=show?'text':'password';
+    button.setAttribute('aria-pressed',String(show));
+    button.setAttribute('aria-label',show?'Parolni yashirish':'Parolni ko‘rsatish');
+    button.innerHTML=icon(show?'eyeOff':'eye');return;
+  }
+  if(action==='send-sms'||action==='send-me-sms'){
     const form=button.closest('form'),phone=form.elements.phone,status=form.querySelector('[data-sms-status]');
     if(!phone.reportValidity())return;
+    const purpose=button.dataset.purpose||form.dataset.purpose||'register';
+    const endpoint=action==='send-me-sms'?'/me/phone/send':'/auth/phone/send';
+    const body={phone:phone.value,purpose};
+    if(action==='send-me-sms'&&purpose==='change_phone'&&form.elements.currentPassword)body.currentPassword=form.elements.currentPassword.value;
     button.disabled=true;
     try{
-      await api('/auth/phone/send',{method:'POST',body:JSON.stringify({phone:phone.value})});
-      status.textContent='SMS yuborildi. Kod 5 daqiqa amal qiladi.';
+      const r=await api(endpoint,{method:'POST',body:JSON.stringify(body)});
+      status.textContent=r.message||'SMS yuborildi. Kod 5 daqiqa amal qiladi.';
+      status.classList.remove('is-error');
       form.elements.code.focus();
-      const until=Date.now()+60000;
-      const timer=setInterval(()=>{if(!button.isConnected){clearInterval(timer);return;}const left=Math.max(0,Math.ceil((until-Date.now())/1000));button.textContent=left?'Qayta yuborish ('+left+' s)':'SMS kodni qayta yuborish';if(!left){clearInterval(timer);button.disabled=false;}},250);
-    }catch(e){status.textContent=e.message;button.disabled=false;notify(e.message,true);}
+      listenWebOtp(form.elements.code);
+      startSmsTimer(button,r.retryAfter||60);
+    }catch(e){status.textContent=e.message;status.classList.add('is-error');button.disabled=false;notify(e.message,true);}
     return;
   }
+  if(action==='admin-2fa-setup'){
+    const r=await api('/admin/security/2fa/setup',{method:'POST',body:'{}'});
+    $('#admin-2fa-secret').textContent=r.secret;$('#admin-2fa-setup-box').hidden=false;button.hidden=true;return;
+  }
+  if(action==='revoke-session'){await api('/me/sessions/'+encodeURIComponent(id),{method:'DELETE',body:'{}'});notify('Sessiya yopildi.');render();return;}
+  if(action==='refresh-session'){await api('/me/sessions/refresh',{method:'POST',body:'{}'});notify('Sessiya yangilandi.');render();return;}
+  if(action==='logout-others'){await api('/me/sessions/logout-others',{method:'POST',body:'{}'});notify('Boshqa qurilmalardagi sessiyalar yopildi.');render();return;}
+  if(action==='logout-all'){if(!confirm('Barcha qurilmalardan chiqilsinmi?'))return;await api('/me/sessions/logout-all',{method:'POST',body:'{}'});state.user=null;state.favorites=new Set();saveLocal('marketuz_favorites',[]);notify('Barcha qurilmalardan chiqildi.');nav('/');return;}
   if(action==='auth-mode') return nav('/account?mode='+button.dataset.mode);
   if(action==='product-choose')return nav('/product/'+id);
   if(action==='gallery-select'||action==='gallery-shift'){
@@ -478,6 +600,21 @@ document.addEventListener('change',event=>{
   if(event.target.name==='category'&&event.target.closest('.studio-form')){const select=event.target.form.elements.subcategory;select.innerHTML='<option value="">Tanlanmagan</option>'+((state.studioSubcategories||[]).filter(x=>x.category===event.target.value).map(x=>`<option value="${esc(x.name)}">${esc(x.name)}</option>`).join(''));}
   if(event.target.closest('.studio-form .asset-field')&&event.target.tagName==='INPUT'){const preview=event.target.parentElement.querySelector('img');if(preview)preview.src=safeImage(event.target.value)||'/assets/product-placeholder.svg';}
   if(event.target.id==='studio-excel-file'){state.studioImportData=null;const panel=$('#studio-import-preview');if(panel)panel.hidden=true;}
+});
+document.addEventListener('input',event=>{
+  const el=event.target;
+  if(el.matches('[data-phone-format]')){
+    const formatted=formatUzPhoneInput(el.value);
+    if(el.value!==formatted) el.value=formatted;
+  }
+  if(el.matches('[data-otp-input]')){
+    const clean=el.value.replace(/\D/g,'').slice(0,6);
+    if(el.value!==clean) el.value=clean;
+  }
+  if(el.matches('[data-strength-input]')){
+    const meter=el.closest('.field')?.querySelector('[data-strength-meter]');
+    if(meter){const info=evalPasswordStrength(el.value);meter.dataset.level=info.cls;meter.querySelector('small').textContent=info.label;}
+  }
 });
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeMenu();});
 $('#drawer-backdrop').addEventListener('click',closeMenu);

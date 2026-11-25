@@ -55,3 +55,32 @@
 .eyebrow-light { color:var(--lime); }
 .seller-apply { margin-bottom:30px; }
 .loading-state { min-height:340px; display:grid; place-items:center; color:#738178; font-weight:700; }
+
+/* Auth, password controls, sessions, and security settings */
+.password-field { position:relative; display:flex; align-items:center; }
+.password-field input { padding-right:48px; }
+.password-toggle { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:38px; height:38px; border:0; background:transparent; color:#526b62; border-radius:10px; display:grid; place-items:center; }
+.password-toggle:hover { background:#edf3ea; color:var(--forest); }
+.strength-meter { display:grid; gap:5px; margin-top:2px; }
+.strength-bar { display:block; height:5px; border-radius:99px; background:#e5ebe3; position:relative; overflow:hidden; }
+.strength-bar::after { content:''; display:block; height:100%; width:0%; border-radius:inherit; transition:width .2s, background-color .2s; }
+.strength-meter[data-level="weak"] .strength-bar::after { width:25%; background:#c75b4f; }
+.strength-meter[data-level="medium"] .strength-bar::after { width:55%; background:#d29b41; }
+.strength-meter[data-level="good"] .strength-bar::after { width:80%; background:#438b6b; }
+.strength-meter[data-level="strong"] .strength-bar::after { width:100%; background:#19684f; }
+.strength-meter small { font-size:.7rem; color:#66786e; font-weight:600; }
+.sms-action-row { display:flex; gap:10px; flex-wrap:wrap; }
+.sms-status { margin:0; font-size:.78rem; color:#225c48; font-weight:700; min-height:1.1em; }
+.sms-status.is-error { color:#b2473c; }
+.auth-links-row { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+.auth-links-row button, .auth-switch button { border:0; background:none; color:#1f684e; font-weight:800; text-decoration:underline; min-height:36px; padding:6px 4px; }
+.auth-2fa-box { padding:14px; border-radius:14px; background:#f2f7ee; border:1px solid #cfe0cc; display:grid; gap:10px; }
+.checkbox-row input { width:20px; height:20px; flex:none; margin-top:2px; }
+.security-stack { display:grid; gap:18px; }
+.session-list { display:grid; gap:10px; margin:14px 0; }
+.session-item { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border:1px solid #e1e8dd; border-radius:13px; background:#f9fbf7; }
+.session-item strong { display:flex; align-items:center; gap:8px; font-size:.84rem; }
+.session-item small { display:block; color:#68796f; font-size:.72rem; margin-top:3px; }
+.session-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.totp-secret { display:block; padding:12px 14px; margin:10px 0 14px; border-radius:11px; background:#f1f6ee; border:1px dashed #82a392; font-size:.9rem; font-weight:800; letter-spacing:.08em; word-break:break-all; color:var(--forest); }
+.danger-card { border-color:#eed3cd; background:#fffaf9; }
