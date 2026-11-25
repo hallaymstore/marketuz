@@ -151,3 +151,17 @@ CREATE TABLE IF NOT EXISTS shipment_events (
  UNIQUE(order_id,source,external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_shipment_events_order ON shipment_events(order_id,recorded_at DESC);
+
+-- Verified identity is separate from editable delivery/profile telephone.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_phone VARCHAR(13);
+CREATE UNIQUE INDEX IF NOT EXISTS users_verified_phone_unique ON users(verified_phone) WHERE verified_phone IS NOT NULL;
+CREATE TABLE IF NOT EXISTS phone_otps (
+ phone VARCHAR(12) PRIMARY KEY, digest CHAR(64) NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+ attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 5)
+);
+CREATE TABLE IF NOT EXISTS sms_requests (
+ id BIGSERIAL PRIMARY KEY, phone VARCHAR(12) NOT NULL, ip TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sms_requests_phone_time ON sms_requests(phone,created_at DESC);
+CREATE INDEX IF NOT EXISTS sms_requests_ip_time ON sms_requests(ip,created_at DESC);
+CREATE INDEX IF NOT EXISTS sms_requests_time ON sms_requests(created_at);
