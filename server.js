@@ -1,4 +1,5 @@
 import express from 'express';
+import {mountPhoneAuth,smsReady} from './phone-auth.js';
 import pg from 'pg';
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -75,7 +76,7 @@ const paymentUrl=(gateway,id,total)=>{
   return u.href;
 };
 const hashPassword = async password => { const salt = randomBytes(16).toString('hex'); const key = await scrypt(password, salt, 64); return salt + ':' + key.toString('hex'); };
-const verifyPassword = async (password, encoded) => { const [salt, hash] = (encoded || '').split(':'); if (!salt || !hash || hash.length !== 128) return false; const actual = await scrypt(password, salt, 64); return timingSafeEqual(Buffer.from(hash, 'hex'), actual); };
+const verifyPassword = async (password, encoded) => { const [salt, hash] = (encoded || '').split(':'); if (!salt || !hash || !/^[0-9a-f]{128}$/.test(hash)) return false; const actual = await scrypt(password, salt, 64); return timingSafeEqual(Buffer.from(hash, 'hex'), actual); };
 function tokenFor(id) { const payload = Buffer.from(JSON.stringify({ id: String(id), exp: Date.now() + 7 * 864e5 })).toString('base64url'); return payload + '.' + createHmac('sha256', secret).update(payload).digest('base64url'); }
 function tokenId(value) {
   try { const [payload, signature] = value.split('.'); if (!payload || !signature) return null; const expected = createHmac('sha256', secret).update(payload).digest(); const actual = Buffer.from(signature, 'base64url'); if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null; const obj = JSON.parse(Buffer.from(payload, 'base64url').toString()); return obj.exp > Date.now() && /^\d+$/.test(obj.id) ? obj.id : null; } catch { return null; }
@@ -89,7 +90,7 @@ const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Da
 setInterval(() => { for (const [key, value] of authHits) if (value.until < Date.now()) authHits.delete(key); }, 20 * 60_000).unref();
 
 app.get('/api/healthz', route(async (req, res) => { if (pool) await pool.query('SELECT 1'); res.json({ ok: true, database: pool ? 'ready' : 'preview' }); }));
-app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN }));
+app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, smsEnabled:!demoOnly&&smsReady() }));
 app.get('/media/:id', requireDb, route(async (req,res)=>{
   if(!/^[0-9a-f-]{36}$/.test(req.params.id)) throw fail(404,'Rasm topilmadi.');
   const {rows}=await pool.query('SELECT mime,bytes FROM site_assets WHERE id=$1',[req.params.id]);
@@ -211,16 +212,18 @@ app.get('/api/recommendations',route(async(req,res)=>{
   res.json({products,personalized});
 }));
 
+mountPhoneAuth(app,{pool,requireDb,rateAuth,route,fail,hashPassword,verifyPassword,setSession});
 app.post('/api/auth/register', requireDb, rateAuth, route(async (req, res) => {
   const name = text(req.body.name), email = text(req.body.email, 200).toLowerCase(), password = String(req.body.password || '');
-  if (name.length < 2 || !emailOk(email) || password.length < 10 || password.length > 128) throw fail(400, 'Ism, email va kamida 10 belgili parol kiriting.');
+  if (name.length < 2 || email.endsWith('@marketuz.invalid') || !emailOk(email) || password.length < 10 || password.length > 128) throw fail(400, 'Ism, email va kamida 10 belgili parol kiriting.');
   if (req.body.agree !== true) throw fail(400, 'Foydalanish shartlari va maxfiylik siyosatini tasdiqlang.');
   try { const result = await pool.query('INSERT INTO users(full_name,email,password_hash) VALUES($1,$2,$3) RETURNING id,full_name,email,phone,role,seller_status', [name,email,await hashPassword(password)]); setSession(res, result.rows[0].id); res.status(201).json({ user: result.rows[0] }); }
   catch (e) { if (e.code === '23505') throw fail(409, 'Bu email bilan hisob allaqachon ochilgan.'); throw e; }
 }));
 app.post('/api/auth/login', requireDb, rateAuth, route(async (req, res) => {
   const email = text(req.body.email, 200).toLowerCase(), password = String(req.body.password || '');
-  const { rows } = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
+  if (!password || password.length > 128 || email.endsWith('@marketuz.invalid')) throw fail(401, 'Email yoki parol noto‘g‘ri.');
+  const { rows } = await pool.query('SELECT id,full_name,email,phone,role,seller_status,password_hash FROM users WHERE email=$1', [email]);
   if (!rows[0] || !(await verifyPassword(password, rows[0].password_hash))) throw fail(401, 'Email yoki parol noto‘g‘ri.');
   setSession(res, rows[0].id); const { password_hash, ...user } = rows[0]; res.json({ user });
 }));
@@ -563,6 +566,8 @@ async function initialize() {
 }
 await initialize();
 if(pool){
+  const pruneSms=()=>Promise.all([pool.query("DELETE FROM sms_requests WHERE created_at<now()-interval '2 days'"),pool.query("DELETE FROM phone_otps WHERE expires_at<now()")]).catch(()=>console.error('SMS cleanup failed'));
+  pruneSms();setInterval(pruneSms,3600000).unref();
   const prune=()=>pool.query("DELETE FROM product_events WHERE id IN (SELECT id FROM product_events WHERE created_at<now()-interval '90 days' ORDER BY id LIMIT 5000)").catch(e=>console.error('Activity pruning:',e.message));
   prune();setInterval(prune,60*60_000).unref();
   const expire=async()=>{
