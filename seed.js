@@ -17,7 +17,7 @@ export const products = [
   ['Retro quyosh ko‘zoynagi', 'Yengil ramka va yorqin kunlar uchun zamonaviy detal.', 'aksessuar', 139000, 179000, 52, 'https://images.unsplash.com/photo-1572635196237-14b3f281503f?w=1100&q=85', 'Yangi'],
   ['Wireless Studio quloqchin', 'Tiniq ovoz, faol shovqin pasaytirish va kun bo‘yi qulaylik.', 'elektronika', 389000, 490000, 29, 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=1100&q=85', 'Yangi'],
   ['Minimalist qo‘l soati', 'Zamonaviy ko‘rinish va har kungi uchrashuvlar uchun nafis detal.', 'moda', 279000, 349000, 38, 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=1100&q=85', 'Ommabop'],
-  ['Linen Lounge kreslo', 'Yumshoq mato, qulay suyanchiq va xonadonga iliq kayfiyat.', 'uy', 1259000, 1499000, 8, 'https://images.unsplash.com/photo-1598300053653-4b754a5c5824?w=1100&q=85', 'Chegirma'],
+  ['Linen Lounge kreslo', 'Yumshoq mato, qulay suyanchiq va xonadonga iliq kayfiyat.', 'uy', 1259000, 1499000, 8, '/assets/home-story.webp', 'Chegirma'],
   ['Atelier yuz parvarishi to‘plami', 'Kundalik parvarish uchun soddalashtirilgan uch bosqichli to‘plam.', 'gozallik', 219000, 269000, 47, 'https://images.unsplash.com/photo-1608248543803-ba4f8c70ae0b?w=1100&q=85', 'Yangi'],
   ['Urban Runner krossovkasi', 'Yengil taglik va shahardagi faol kunlar uchun qulay uslub.', 'sport', 459000, 579000, 24, 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=1100&q=85', 'Top'],
   ['Keramika choy to‘plami', 'Sokin tonglar uchun nafis keramika va yumshoq ranglar.', 'uy', 299000, 355000, 18, 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=1100&q=85', 'Tanlov'],

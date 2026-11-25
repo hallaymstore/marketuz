@@ -1,4 +1,4 @@
-const checkoutFields = new Set(['recipient','phone','region','district','address','note','paymentMethod','items','agree','checkoutKey']);
+const checkoutFields = new Set(['recipient','phone','region','district','address','note','paymentMethod','items','agree','checkoutKey','promoCode']);
 const itemFields = new Set(['id','variantId','qty']);
 
 export function hasCardNumber(value) {

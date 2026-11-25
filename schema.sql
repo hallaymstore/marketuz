@@ -249,3 +249,77 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id, created_at DESC);
+
+-- Buyer, Seller, Admin & Marketplace features (additive)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS rating_avg NUMERIC(3,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS rating_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_products_rating_feed ON products(status, rating_avg DESC, id DESC);
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code VARCHAR(32);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS cart_items (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+ variant_id BIGINT REFERENCES product_variants(id) ON DELETE CASCADE,
+ qty INTEGER NOT NULL DEFAULT 1 CHECK(qty BETWEEN 1 AND 20),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cart_items_unique ON cart_items(user_id, product_id, coalesce(variant_id, 0));
+
+CREATE TABLE IF NOT EXISTS product_reviews (
+ id BIGSERIAL PRIMARY KEY,
+ product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ order_id UUID REFERENCES orders(id) ON DELETE SET NULL,
+ rating SMALLINT NOT NULL CHECK(rating BETWEEN 1 AND 5),
+ comment VARCHAR(1000) NOT NULL DEFAULT '',
+ verified_purchase BOOLEAN NOT NULL DEFAULT false,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(product_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_product_reviews_product ON product_reviews(product_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS promo_codes (
+ id BIGSERIAL PRIMARY KEY,
+ code VARCHAR(32) NOT NULL UNIQUE,
+ seller_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+ discount_type VARCHAR(16) NOT NULL CHECK(discount_type IN ('percent','fixed')),
+ discount_value INTEGER NOT NULL CHECK(discount_value > 0),
+ min_order INTEGER NOT NULL DEFAULT 0,
+ max_discount INTEGER,
+ usage_limit INTEGER,
+ used_count INTEGER NOT NULL DEFAULT 0,
+ starts_at TIMESTAMPTZ,
+ expires_at TIMESTAMPTZ,
+ active BOOLEAN NOT NULL DEFAULT true,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_promo_codes_active ON promo_codes(active, code);
+
+CREATE TABLE IF NOT EXISTS return_requests (
+ id BIGSERIAL PRIMARY KEY,
+ order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+ buyer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ reason VARCHAR(400) NOT NULL,
+ status VARCHAR(24) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','refunded')),
+ resolution_note VARCHAR(400) NOT NULL DEFAULT '',
+ reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_return_requests_status ON return_requests(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notifications (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ kind VARCHAR(32) NOT NULL DEFAULT 'info',
+ title VARCHAR(140) NOT NULL,
+ body VARCHAR(400) NOT NULL DEFAULT '',
+ href VARCHAR(200) NOT NULL DEFAULT '',
+ is_read BOOLEAN NOT NULL DEFAULT false,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at DESC);

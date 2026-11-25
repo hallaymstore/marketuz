@@ -8,8 +8,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check site-config.js && node --check product-import.js && node --check payment-handlers.js && node --check order-safety.js && node --check public/app.js && node --check public/product-studio.js && node --check public/cms-ui.js && node --check public/experience.js",
-    "test": "node --test tests/*.test.js"
+    "check": "node --check server.js && node --check phone-auth.js && node --check security.js && node --check shipping.js && node --check marketplace-features.js && node --check site-config.js && node --check product-import.js && node --check payment-handlers.js && node --check order-safety.js && node --check public/app.js && node --check public/product-studio.js && node --check public/cms-ui.js && node --check public/experience.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

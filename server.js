@@ -26,6 +26,8 @@ import { mountPayments } from './payment-handlers.js';
 import { canAdvanceOrder, checkoutContainsCardData } from './order-safety.js';
 import { buildInterests, rankProducts } from './recommendations.js';
 import { templateWorkbook, parseWorkbook } from './product-import.js';
+import { computePromoDiscount, createNotification, mountMarketplaceFeatures } from './marketplace-features.js';
+import { calculateShipping } from './shipping.js';
 
 const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -57,15 +59,25 @@ app.use((req, res, next) => {
     'Referrer-Policy': 'strict-origin',
     'X-Frame-Options': 'DENY',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; script-src 'self' https://telegram.org https://my.click.uz; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://my.click.uz; frame-src https://my.click.uz; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://my.click.uz"
+    'Content-Security-Policy': "default-src 'self'; object-src 'none'; img-src 'self' data: https:; script-src 'self' https://telegram.org https://my.click.uz; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://my.click.uz; frame-src https://my.click.uz; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://my.click.uz"
   });
   if (process.env.NODE_ENV === 'production') res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 app.use(express.json({ limit: '3mb', type:['application/json','text/json'] }));
 app.use('/api/payments/click',express.urlencoded({extended:false,limit:'16kb'}));
+function hasProtoPollution(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 12) return false;
+  if (Array.isArray(value)) return value.some(x => hasProtoPollution(x, depth + 1));
+  for (const key of Object.keys(value)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') return true;
+    if (hasProtoPollution(value[key], depth + 1)) return true;
+  }
+  return false;
+}
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
+  if (hasProtoPollution(req.body)) return res.status(400).json({ error: 'So‘rov tarkibi noto‘g‘ri.' });
   if (!['GET','HEAD','OPTIONS'].includes(req.method)) {
     if(req.path.startsWith('/payments/')||req.path==='/telegram/webhook') return next(); // Provider signatures/auth are validated by their handlers.
     if (req.get('sec-fetch-site') === 'cross-site') return res.status(403).json({ error: 'So‘rov manbasi tasdiqlanmadi.' });
@@ -187,32 +199,60 @@ app.post('/api/assets', requireDb, auth, route(async(req,res)=>{
   await pool.query('INSERT INTO site_assets(id,owner_id,mime,bytes,size_bytes) VALUES($1,$2,$3,$4,$5)',[id,req.user.id,mime,bytes,bytes.length]);
   res.status(201).json({url:'/media/'+id,size:bytes.length});
 }));
-const catalogFields='id,seller_id,name,description,category,subcategory,brand,price,old_price,stock,stock_mode,restock_days,sold_count,image_url,card_background,detail_background,badge,external_links,variant_count,created_at';
-const feedSort={ newest:{order:'id DESC',key:'id'}, price_asc:{order:'price ASC,id DESC',key:'price'},price_desc:{order:'price DESC,id DESC',key:'price'},popular:{order:'sold_count DESC,id DESC',key:'sold_count'} };
+const catalogFields='id,seller_id,name,description,category,subcategory,brand,price,old_price,stock,stock_mode,restock_days,sold_count,rating_avg,rating_count,image_url,card_background,detail_background,badge,external_links,variant_count,created_at';
+const feedSort={ newest:{order:'id DESC',key:'id'}, price_asc:{order:'price ASC,id DESC',key:'price'},price_desc:{order:'price DESC,id DESC',key:'price'},popular:{order:'sold_count DESC,id DESC',key:'sold_count'},rating:{order:'rating_avg DESC,id DESC',key:'rating_avg'} };
 const encodeCursor=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
 const decodeCursor=(value,sort,q,category)=>{
   if(!value) return null;
   if(typeof value!=='string'||value.length>400) throw fail(400,'Katalog kursori xato.');
   try {
     const c=JSON.parse(Buffer.from(value,'base64url').toString('utf8'));
-    if(!Array.isArray(c)||c.length!==5||c[0]!==sort||c[1]!==q||c[2]!==category||!Number.isSafeInteger(c[3])||!Number.isSafeInteger(c[4])||c[4]<1) throw Error();
+    if(!Array.isArray(c)||c.length!==5||c[0]!==sort||c[1]!==q||c[2]!==category||typeof c[3]!=='number'||!Number.isFinite(c[3])||!Number.isSafeInteger(c[4])||c[4]<1) throw Error();
     return c;
   } catch { throw fail(400,'Katalog kursori xato.'); }
 };
+app.get('/api/catalog/suggestions', route(async (req, res) => {
+  const q = text(req.query.q, 80);
+  if (q.length < 2) return res.json({ suggestions: [] });
+  if (demoOnly) {
+    const lower = q.toLowerCase();
+    const suggestions = inMemoryCatalog
+      .filter(p => p.name.toLowerCase().includes(lower) || p.category.toLowerCase().includes(lower))
+      .slice(0, 8)
+      .map(p => ({ id: p.id, name: p.name, category: p.category, price: p.price }));
+    return res.json({ suggestions });
+  }
+  const like = '%' + q.replace(/[\\%_]/g, '\\$&') + '%';
+  const { rows } = await pool.query(
+    `SELECT id, name, category, price FROM products
+     WHERE status='active' AND (name ILIKE $1 ESCAPE '\\' OR brand ILIKE $1 ESCAPE '\\' OR subcategory ILIKE $1 ESCAPE '\\')
+     ORDER BY sold_count DESC, id DESC LIMIT 8`,
+    [like]
+  );
+  res.json({ suggestions: rows });
+}));
 app.get('/api/catalog/feed',route(async(req,res)=>{
-  const q=text(req.query.q,80),category=text(req.query.category,40),sort=feedSort[req.query.sort]?req.query.sort:'newest';
+  const q=text(req.query.q,80),category=text(req.query.category,40),subcategory=text(req.query.subcategory,80),sort=feedSort[req.query.sort]?req.query.sort:'newest';
+  const minPrice=Math.max(0,Number.parseInt(req.query.minPrice,10)||0),maxPrice=Math.max(0,Number.parseInt(req.query.maxPrice,10)||0);
+  const minRating=Math.min(5,Math.max(0,Number(req.query.minRating)||0));
+  const inStock=req.query.inStock==='true';
   const limit=Math.min(36,Math.max(1,Number.parseInt(req.query.limit,10)||24));
   const cursor=decodeCursor(req.query.cursor,sort,q,category), config=feedSort[sort];
   if(category && !site.categories.some(x=>x.id===category)) return res.json({products:[],nextCursor:null,hasMore:false});
   if(demoOnly){
-    let data=inMemoryCatalog.filter(p=>(!category||p.category===category)&&(!q||(p.name+' '+p.description).toLowerCase().includes(q.toLowerCase())));
+    let data=inMemoryCatalog.filter(p=>(!category||p.category===category)&&(!subcategory||p.subcategory===subcategory)&&(!minPrice||p.price>=minPrice)&&(!maxPrice||p.price<=maxPrice)&&(!inStock||p.stock>0||p.stock_mode==='replenishable')&&(!q||(p.name+' '+p.description).toLowerCase().includes(q.toLowerCase())));
     data.sort((a,b)=>sort==='price_asc'?a.price-b.price||b.id-a.id:sort==='price_desc'?b.price-a.price||b.id-a.id:sort==='popular'?b.sold_count-a.sold_count||b.id-a.id:b.id-a.id);
     if(cursor) data=data.filter(p=>sort==='price_asc'?(p.price>cursor[3]||p.price===cursor[3]&&p.id<cursor[4]):sort==='price_desc'?(p.price<cursor[3]||p.price===cursor[3]&&p.id<cursor[4]):sort==='popular'?(p.sold_count<cursor[3]||p.sold_count===cursor[3]&&p.id<cursor[4]):p.id<cursor[4]);
-    const products=data.slice(0,limit),last=products.at(-1);return res.json({products,hasMore:data.length>limit,nextCursor:data.length>limit?encodeCursor([sort,q,category,last[config.key],last.id]):null});
+    const products=data.slice(0,limit),last=products.at(-1);return res.json({products,hasMore:data.length>limit,nextCursor:data.length>limit?encodeCursor([sort,q,category,last[config.key]??0,last.id]):null});
   }
   const params=['active'],where=['status=$1'];
-  if(q){params.push('%'+q.replace(/[\\%_]/g,'\\$&')+'%');where.push(`(name ILIKE $${params.length} ESCAPE '\\' OR description ILIKE $${params.length} ESCAPE '\\')`);}
+  if(q){params.push('%'+q.replace(/[\\%_]/g,'\\$&')+'%');where.push(`(name ILIKE $${params.length} ESCAPE '\\' OR description ILIKE $${params.length} ESCAPE '\\' OR brand ILIKE $${params.length} ESCAPE '\\')`);}
   if(category){params.push(category);where.push(`category=$${params.length}`);}
+  if(subcategory){params.push(subcategory);where.push(`subcategory=$${params.length}`);}
+  if(minPrice>0){params.push(minPrice);where.push(`price>=$${params.length}`);}
+  if(maxPrice>0){params.push(maxPrice);where.push(`price<=$${params.length}`);}
+  if(minRating>0){params.push(minRating);where.push(`rating_avg>=$${params.length}`);}
+  if(inStock){where.push("(stock_mode='replenishable' OR stock>0)");}
   if(cursor){params.push(cursor[3],cursor[4]);const a=params.length-1,b=params.length;where.push(config.key==='id'?`id<$${b}`:sort==='price_asc'?`(price>$${a} OR (price=$${a} AND id<$${b}))`:`(${config.key}<$${a} OR (${config.key}=$${a} AND id<$${b}))`);}
   params.push(limit+1);
   const {rows}=await pool.query(`SELECT ${catalogFields} FROM products WHERE ${where.join(' AND ')} ORDER BY ${config.order} LIMIT $${params.length}`,params);
@@ -552,18 +592,36 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
       detailed.push({...p,qty:item.qty,variantId:v?.id||null,variantLabel:v?.label||'',price,image_url:v?.image_url||p.image_url});
     }
     if(method!=='cod' && detailed.some(p=>p.stock_mode==='replenishable')) throw fail(409,'Buyurtma asosida keladigan mahsulot uchun to‘lov operator tasdiqlaganidan keyin kelishiladi. Yetkazilganda to‘lovni tanlang.');
+    let promoCode = text(body.promoCode, 32).toUpperCase() || null;
+    let discountAmount = 0;
+    if (promoCode) {
+      const promo = (await db.query('SELECT * FROM promo_codes WHERE code=$1 FOR UPDATE', [promoCode])).rows[0];
+      const check = computePromoDiscount(promo, subtotal);
+      if (!check.valid) throw fail(400, check.reason);
+      discountAmount = check.discount;
+      await db.query('UPDATE promo_codes SET used_count = used_count + 1 WHERE id=$1', [promo.id]);
+    }
+    const deliveryFee = 0;
+    const finalTotal = Math.max(1000, subtotal - discountAmount + deliveryFee);
     const id = randomUUID();
-    await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,total,status,payment_status,checkout_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending',checkoutKey]);
+    await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,delivery_fee,total,status,payment_status,checkout_key,promo_code,discount_amount) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,deliveryFee,finalTotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending',checkoutKey,promoCode,discountAmount]);
     for (const p of detailed) {
       await db.query("UPDATE products SET stock=CASE WHEN stock_mode='tracked' THEN stock-$1 ELSE stock END,sold_count=sold_count+$1,updated_at=now() WHERE id=$2", [p.qty,p.id]);
       if(p.variantId&&p.stock_mode==='tracked')await db.query('UPDATE product_variants SET stock=stock-$1,updated_at=now() WHERE id=$2',[p.qty,p.variantId]);
       await db.query('INSERT INTO order_items(order_id,product_id,seller_id,title,image_url,price,quantity,stock_reserved,variant_id,variant_label) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [id,p.id,p.seller_id,p.name,p.image_url,p.price,p.qty,p.stock_mode==='tracked',p.variantId,p.variantLabel]);
     }
-    await db.query('COMMIT'); res.status(201).json({ id, subtotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:paymentUrl(method,id,subtotal), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. To‘lovni xavfsiz oynada yakunlang.' });
+    await createNotification(db, {
+      userId: req.user.id,
+      kind: 'order',
+      title: `Buyurtma #${id.slice(0, 8).toUpperCase()} qabul qilindi`,
+      body: method === 'cod' ? 'Operator tasdiqlashi kutilmoqda.' : 'Onlayn to‘lovni yakunlang.',
+      href: '/account?tab=orders'
+    });
+    await db.query('COMMIT'); res.status(201).json({ id, subtotal, discountAmount, total: finalTotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:paymentUrl(method,id,finalTotal), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. To‘lovni xavfsiz oynada yakunlang.' });
   } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
 }));
 app.get('/api/orders', requireDb, auth, route(async (req, res) => {
-  const result = await pool.query('SELECT * FROM orders WHERE buyer_id=$1 ORDER BY created_at DESC LIMIT 50', [req.user.id]);
+  const result = await pool.query('SELECT o.*, r.status AS return_status, r.resolution_note AS return_note FROM orders o LEFT JOIN return_requests r ON r.order_id = o.id WHERE o.buyer_id=$1 ORDER BY o.created_at DESC LIMIT 50', [req.user.id]);
   const ids = result.rows.map(o => o.id);
   const items = ids.length ? (await pool.query('SELECT * FROM order_items WHERE order_id=ANY($1::uuid[]) ORDER BY id', [ids])).rows : [];
   const events = ids.length ? (await pool.query('SELECT order_id,status,tracking_number,occurred_at,source FROM shipment_events WHERE order_id=ANY($1::uuid[]) ORDER BY occurred_at DESC LIMIT 300',[ids])).rows : [];
@@ -743,6 +801,7 @@ app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (
 }));
 
 mountPayments(app,pool,gatewayConfigured);
+mountMarketplaceFeatures(app,{pool,requireDb,auth,role,route,fail,text,idParam});
 
 const htmlEsc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const absolute=(url,base)=>{try{return new URL(url,base).href;}catch{return base;}};
@@ -788,6 +847,7 @@ async function initialize() {
     for (const p of featuredSamples) await pool.query("INSERT INTO products(name,description,category,price,old_price,stock,image_url,badge,status) SELECT $1::varchar(180),$2,$3,$4,$5,$6,$7,$8,'active' WHERE NOT EXISTS (SELECT 1 FROM products WHERE name=$1::varchar(180) AND seller_id IS NULL)",p);
   }
   await pool.query("UPDATE products SET image_url=$1,updated_at=now() WHERE seller_id IS NULL AND name=$2 AND image_url<>$1", ['/assets/product-mini-bag.webp','Urban mini sumka']);
+  await pool.query("UPDATE products SET image_url=$1,updated_at=now() WHERE seller_id IS NULL AND name=$2 AND image_url LIKE '%photo-1598300053653-4b754a5c5824%'", ['/assets/home-story.webp','Linen Lounge kreslo']);
   const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase(), adminPassword = process.env.ADMIN_PASSWORD;
   if(adminEmail && adminPassword) {
     if(!emailOk(adminEmail) || adminPassword.length < 16) throw new Error('ADMIN_EMAIL/ADMIN_PASSWORD configuration is invalid.');
@@ -833,5 +893,7 @@ if (isMain) {
   await initialize();
   startBackgroundJobs();
   const server = app.listen(Number(process.env.PORT || 3000), '0.0.0.0', () => console.log('Marketuz listening on port', server.address().port));
-  process.on('SIGTERM', () => server.close(() => pool?.end()));
+  const shutdown = () => server.close(() => pool?.end().then(() => process.exit(0)));
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
