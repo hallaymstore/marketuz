@@ -236,6 +236,18 @@ test('UzPost branch nearest sorting, pickup order creation, and Click sandbox on
       assert.equal(myOrders[0].payment_status, 'paid');
       assert.equal(myOrders[0].delivery_mode, 'uzpost_pickup');
       assert.ok(myOrders[0].pickup_branch_label.includes(branchRes.branches[0].name));
+
+      // Admin payments and safe backup endpoints
+      assert.equal((await req('/admin/payments', { cookie: buyerCookie })).status, 403);
+      const adminCookie = (await req('/auth/login', { method: 'POST', body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })).cookie;
+      const payList = (await req('/admin/payments', { cookie: adminCookie })).data;
+      assert.ok(payList.transactions.length >= 1);
+      assert.equal(payList.transactions[0].gateway, 'click');
+      assert.equal(payList.summary.paid_count, 1);
+
+      const backup = (await req('/admin/backup', { cookie: adminCookie })).data;
+      assert.ok(Array.isArray(backup.products) && backup.products.length >= 1);
+      assert.equal(backup.users, undefined);
     });
   } finally {
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;

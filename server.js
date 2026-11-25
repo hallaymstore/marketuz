@@ -841,7 +841,14 @@ app.get('*', route(async (req,res) => {
   const extra=`<link rel="canonical" href="${htmlEsc(canonical)}"><meta property="og:type" content="${type}"><meta property="og:site_name" content="${htmlEsc(site.brand.name)}"><meta property="og:title" content="${htmlEsc(title)}"><meta property="og:description" content="${htmlEsc(description)}"><meta property="og:image" content="${htmlEsc(absolute(picture,site.seo.siteUrl))}"><meta property="og:url" content="${htmlEsc(canonical)}"><meta name="twitter:card" content="summary_large_image"><meta name="keywords" content="${htmlEsc(site.seo.keywords)}">${structured}`;
   res.set('Cache-Control','no-store').type('html').send(shell.replace(/<title>[^<]*<\/title>/,`<title>${htmlEsc(title)}</title>`).replace(/<meta name="description" content="[^"]*">/,`<meta name="description" content="${htmlEsc(description)}">`).replace('</head>',`<link rel="icon" href="${htmlEsc(site.brand.favicon||'/favicon.svg')}"><link rel="manifest" href="/manifest.webmanifest">${extra}</head>`));
 }));
-app.use((err,req,res,next) => { if(res.headersSent) return next(err); if(!err.status || err.status >= 500) console.error('Request error:', err.message); res.status(err.status || 500).json({ error: err.status ? err.message : 'Serverda xatolik yuz berdi. Keyinroq urinib ko‘ring.' }); });
+app.use((err,req,res,next) => {
+  if(res.headersSent) return next(err);
+  if(!err.status || err.status >= 500) {
+    console.error('Request error:', err.message);
+    if (pool) logSecurityEvent(pool, { userId: req.user?.id || null, eventType: 'server_error', severity: 'error', req, details: { method: req.method, path: String(req.path || '').slice(0, 120), message: String(err.message || '').slice(0, 180) } }).catch(() => {});
+  }
+  res.status(err.status || 500).json({ error: err.status ? err.message : 'Serverda xatolik yuz berdi. Keyinroq urinib ko‘ring.' });
+});
 
 async function initialize() {
   if (!pool) { console.warn('DATABASE_URL yo‘q: faqat namoyish katalogi ishlaydi.'); return; }

@@ -359,7 +359,8 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
         `SELECT
            pg_database_size(current_database())::bigint AS db_bytes,
            (SELECT count(*)::int FROM user_sessions WHERE revoked_at IS NULL AND expires_at > now()) AS active_sessions,
-           (SELECT count(*)::int FROM site_assets) AS media_assets`
+           (SELECT count(*)::int FROM site_assets) AS media_assets,
+           (SELECT count(*)::int FROM security_events WHERE severity='error' AND created_at > now() - interval '24 hours') AS errors_24h`
       )
     ]);
     res.json({
@@ -373,5 +374,47 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
         nodeVersion: process.version
       }
     });
+  }));
+
+  app.get('/api/admin/payments', requireDb, auth, role('admin'), route(async (req, res) => {
+    const [txRes, sumRes] = await Promise.all([
+      pool.query(
+        `SELECT t.*, o.status AS order_status, o.payment_status, o.recipient, u.full_name AS buyer_name
+         FROM payment_transactions t
+         JOIN orders o ON o.id = t.order_id
+         JOIN users u ON u.id = o.buyer_id
+         ORDER BY t.id DESC LIMIT 100`
+      ),
+      pool.query(
+        `SELECT
+           coalesce(sum(amount) FILTER (WHERE state = 2), 0)::bigint AS paid_total,
+           coalesce(sum(amount) FILTER (WHERE state < 0), 0)::bigint AS refunded_total,
+           count(*) FILTER (WHERE state = 2)::int AS paid_count,
+           count(*) FILTER (WHERE state = 1)::int AS pending_count
+         FROM payment_transactions`
+      )
+    ]);
+    res.json({ transactions: txRes.rows, summary: sumRes.rows[0] });
+  }));
+
+  app.get('/api/admin/backup', requireDb, auth, role('admin'), route(async (req, res) => {
+    const [subcats, prods, variants, promos, settingsRes] = await Promise.all([
+      pool.query('SELECT id, category, name FROM product_subcategories ORDER BY category, name'),
+      pool.query('SELECT id, seller_id, name, description, category, subcategory, brand, sku, price, old_price, stock, stock_mode, status, badge, created_at FROM products ORDER BY id'),
+      pool.query('SELECT id, product_id, label, sku, price, stock, active, position FROM product_variants ORDER BY product_id, position, id'),
+      pool.query('SELECT id, code, discount_type, discount_value, min_order, max_discount, usage_limit, used_count, active, created_at FROM promo_codes ORDER BY id'),
+      pool.query("SELECT key, value, updated_at FROM site_settings WHERE key='site'")
+    ]);
+    await logAudit(pool, { actorId: req.user.id, action: 'admin_backup_export', targetType: 'database', targetId: 'safe-json', req });
+    res.set('Cache-Control', 'no-store')
+      .set('Content-Disposition', 'attachment; filename="marketuz-backup.json"')
+      .json({
+        exportedAt: new Date().toISOString(),
+        subcategories: subcats.rows,
+        products: prods.rows,
+        variants: variants.rows,
+        promos: promos.rows,
+        siteSettings: settingsRes.rows[0]?.value || null
+      });
   }));
 }

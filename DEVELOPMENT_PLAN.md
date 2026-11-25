@@ -18,8 +18,8 @@
 - [x] Doimiy savat sinxronizatsiyasi, taqqoslash (`/compare`), yaqinda ko‘rilganlar, xaridor sharhlari, promokodlar, qaytarish arizalari, bildirishnomalar, Yordam markazi (`/help`).
 
 ## P2 — Sotuvchi, Admin va Yetkazib berish tizimi — **BAJARILDI**
-- [x] Sotuvchi savdo statistikasi, komissiya hisobi va qaytarish arizalari.
-- [x] Admin: xaridorlar, promokodlar, qaytarishlar, SMS xarajatlari, audit/security monitoring, DB/server health.
+- [x] Sotuvchi savdo statistikasi, komissiya hisobi, qaytarish arizalari, bildirishnomalar va do‘kon dizayni.
+- [x] Admin: xaridorlar, promokodlar, to‘lov tranzaksiyalari, qaytarishlar, SMS xarajatlari, 5xx xato va audit/security monitoring, DB/server health va xavfsiz zaxira eksporti.
 - [x] Yetkazish provider abstraction (`shipping.js`), viloyat-tuman bog‘lanishi, 24 ta UzPost filiali (GPS eng yaqin + qo‘lda tanlash) va `CLICK_SANDBOX_MOCK` sinov karta oynasi (production'da qat'iyan o‘chirilgan).
 
 ## P3 — Performance, Avtomatik Testlar va CI/CD — **BAJARILDI (Production deploy kutilmoqda)**
