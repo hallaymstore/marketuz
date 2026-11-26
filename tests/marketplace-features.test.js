@@ -195,6 +195,10 @@ test('UzPost branch nearest sorting, pickup order creation, and Click sandbox on
       assert.equal(cfg.clickSandbox, true);
       assert.ok(cfg.payments.includes('click'));
 
+      // 1) Non-production /api/config returns click prepayment and hides cod when ALLOW_COD is not enabled
+      assert.ok(cfg.payments.includes('click'));
+      assert.equal(cfg.payments.includes('cod'), false);
+
       // Nearest UzPost branch sorting around Tashkent center
       const branchRes = (await req('/shipping/branches?lat=41.3111&lng=69.2797')).data;
       assert.ok(branchRes.branches.length >= 10);
@@ -205,7 +209,7 @@ test('UzPost branch nearest sorting, pickup order creation, and Click sandbox on
       const cat = (await req('/catalog')).data;
       const pid = cat.products.find(p => p.stock_mode !== 'replenishable' && !p.variant_count && p.stock >= 1).id;
 
-      // Create order with UzPost branch pickup + Click sandbox payment
+      // Create order with UzPost branch pickup + Click card prepayment
       const order = await req('/orders', {
         method: 'POST',
         cookie: buyerCookie,
@@ -222,14 +226,40 @@ test('UzPost branch nearest sorting, pickup order creation, and Click sandbox on
       });
       assert.equal(order.status, 201);
       assert.equal(order.data.status, 'awaiting_payment');
-      assert.match(order.data.paymentUrl, /^\/api\/payments\/click\/sandbox-pay\?orderId=/);
+      assert.equal(order.data.paymentUrl, '/pay/' + order.data.id);
 
-      // Complete sandbox payment
-      const payResp = await req('/payments/click/sandbox-pay', {
+      // Step 1: Invalid card fails Luhn check cleanly; valid 16-digit card + MM/YY succeeds
+      const badCard = await req('/payments/click/card-request', {
         method: 'POST',
-        body: { orderId: order.data.id, decision: 'pay' }
+        cookie: buyerCookie,
+        body: { orderId: order.data.id, cardNumber: '8600 0000 0000 0001', expireDate: '12/28' }
       });
-      assert.ok([200, 303].includes(payResp.status));
+      assert.equal(badCard.status, 400);
+
+      const cardReq = await req('/payments/click/card-request', {
+        method: 'POST',
+        cookie: buyerCookie,
+        body: { orderId: order.data.id, cardNumber: '8600 0000 0000 0007', expireDate: '12/28' }
+      });
+      assert.equal(cardReq.status, 200);
+      assert.equal(cardReq.data.step, 'verify');
+      assert.match(cardReq.data.sandboxSmsCode, /^\d{6}$/);
+
+      // Step 2: Verify SMS OTP -> charge exact order total -> mark order paid
+      const badVerify = await req('/payments/click/card-verify', {
+        method: 'POST',
+        cookie: buyerCookie,
+        body: { orderId: order.data.id, smsCode: cardReq.data.sandboxSmsCode === '111111' ? '222222' : '111111' }
+      });
+      assert.equal(badVerify.status, 400);
+
+      const cardVerify = await req('/payments/click/card-verify', {
+        method: 'POST',
+        cookie: buyerCookie,
+        body: { orderId: order.data.id, smsCode: cardReq.data.sandboxSmsCode }
+      });
+      assert.equal(cardVerify.status, 200);
+      assert.equal(cardVerify.data.paymentStatus, 'paid');
 
       const myOrders = (await req('/orders', { cookie: buyerCookie })).data.orders;
       assert.equal(myOrders[0].status, 'new');

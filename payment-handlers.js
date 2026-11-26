@@ -1,4 +1,5 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { hasCardNumber } from './order-safety.js';
 
 const error=(code,message,data)=>({code,message:{uz:message,ru:message,en:message},...(data?{data}:{})});
 const rpcFail=(code,message,data)=>{throw error(code,message,data);};
@@ -22,7 +23,23 @@ async function releaseOrder(db,orderId,paid=false){
     await db.query('UPDATE products p SET stock=CASE WHEN p.variant_count>0 THEN (SELECT coalesce(sum(v.stock),0) FROM product_variants v WHERE v.product_id=p.id AND v.active) WHEN $4::bigint IS NULL AND $1::int>0 THEN p.stock+$1 ELSE p.stock END,sold_count=GREATEST(0,sold_count-$2) WHERE p.id=$3',[p.stock_reserved?p.quantity:0,p.quantity,p.product_id,p.variant_id]);
   }
 }
-export function mountPayments(app,pool,ready){
+export function clickCardApiReady() {
+  return process.env.PAYMENTS_ENABLED === 'true' && !!(process.env.CLICK_SERVICE_ID && process.env.CLICK_SECRET_KEY && process.env.CLICK_MERCHANT_USER_ID);
+}
+export function clickAuthHeader() {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const digest = createHash('sha1').update(ts + String(process.env.CLICK_SECRET_KEY || '')).digest('hex');
+  return `${process.env.CLICK_MERCHANT_USER_ID}:${digest}:${ts}`;
+}
+const pendingCardTokens = new Map();
+function normalizeExpiryMmYy(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!/^\d{4}$/.test(digits)) return null;
+  const mm = Number(digits.slice(0, 2));
+  if (mm < 1 || mm > 12) return null;
+  return digits;
+}
+export function mountPayments(app,pool,ready,opts={}){
   app.post('/api/payments/payme',async(req,res)=>{
     const id=req.body?.id??null,method=req.body?.method,params=req.body?.params||{};
     const response=(result,issue)=>res.json({id,...(issue?{error:issue}:{result})});
@@ -182,4 +199,115 @@ export function mountPayments(app,pool,ready){
       db.release();
     }
   });
+
+  if (opts.auth && opts.route && opts.fail && opts.requireDb) {
+    const { auth, route, fail, requireDb } = opts;
+
+    // Step 1: Validate card + expiry on dedicated /pay/:id page & request Click SMS OTP (PAN is NEVER saved to DB)
+    app.post('/api/payments/click/card-request', requireDb, auth, route(async (req, res) => {
+      const orderId = String(req.body?.orderId || '');
+      if (!idOk(orderId)) throw fail(404, 'Buyurtma topilmadi.');
+      const cardDigits = String(req.body?.cardNumber || '').replace(/\D/g, '');
+      const expireMmYy = normalizeExpiryMmYy(req.body?.expireDate);
+      if (cardDigits.length !== 16 || !hasCardNumber(cardDigits)) throw fail(400, '16 xonali bank karta raqamini to‘g‘ri kiriting.');
+      if (!expireMmYy) throw fail(400, 'Karta amal qilish muddatini OO/YY ko‘rinishida kiriting.');
+
+      const o = (await pool.query('SELECT id, buyer_id, total, status, payment_method FROM orders WHERE id=$1', [orderId])).rows[0];
+      if (!o || String(o.buyer_id) !== String(req.user.id)) throw fail(404, 'Buyurtma topilmadi.');
+      if (o.payment_method !== 'click' || o.status !== 'awaiting_payment') throw fail(409, 'Bu buyurtma uchun to‘lov kutilmayapti.');
+
+      const key = `${o.id}:${req.user.id}`;
+      const maskedCard = `${cardDigits.slice(0, 4)} •••• •••• ${cardDigits.slice(-4)}`;
+
+      if (clickCardApiReady()) {
+        const resp = await fetch('https://api.click.uz/v2/merchant/card_token/request', {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', Auth: clickAuthHeader() },
+          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_number: cardDigits, expire_date: expireMmYy, temporary: 1 }),
+          signal: AbortSignal.timeout(15_000)
+        });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || Number(data?.error_code) !== 0 || !data?.card_token) {
+          throw fail(400, String(data?.error_note || 'Click karta tekshiruvidan o‘tmadi. Ma’lumotlarni tekshiring.'));
+        }
+        pendingCardTokens.set(key, { cardToken: String(data.card_token), mode: 'click', maskedCard, expiresAt: Date.now() + 10 * 60_000 });
+        return res.json({ ok: true, step: 'verify', maskedCard, phoneNumber: String(data.phone_number || ''), message: 'Kartaga bog‘langan raqamga SMS kod yuborildi.' });
+      }
+
+      if (isClickSandboxAllowed()) {
+        const sandboxOtp = String(randomInt(100_000, 1_000_000));
+        pendingCardTokens.set(key, { cardToken: 'sbx-' + randomUUID(), mode: 'sandbox', sandboxOtp, maskedCard, expiresAt: Date.now() + 10 * 60_000 });
+        return res.json({ ok: true, step: 'verify', maskedCard, sandboxSmsCode: sandboxOtp, message: 'Sinov bank SMS kodi yuborildi.' });
+      }
+
+      throw fail(503, 'Click Merchant API kalitlari (CLICK_SERVICE_ID, CLICK_SECRET_KEY, CLICK_MERCHANT_USER_ID va PAYMENTS_ENABLED=true) hali Render sozlamalariga kiritilmagan.');
+    }));
+
+    // Step 2: Verify SMS OTP & charge exact backend order total
+    app.post('/api/payments/click/card-verify', requireDb, auth, route(async (req, res) => {
+      const orderId = String(req.body?.orderId || '');
+      const smsCode = String(req.body?.smsCode || '').replace(/\D/g, '');
+      if (!idOk(orderId)) throw fail(404, 'Buyurtma topilmadi.');
+      if (!/^\d{4,8}$/.test(smsCode)) throw fail(400, 'SMS tasdiqlash kodini kiriting.');
+
+      const key = `${orderId}:${req.user.id}`;
+      const pending = pendingCardTokens.get(key);
+      if (!pending || pending.expiresAt < Date.now()) {
+        pendingCardTokens.delete(key);
+        throw fail(400, 'To‘lov sessiyasi muddati tugagan. Kartani qayta kiriting.');
+      }
+
+      const dbCheck = (await pool.query('SELECT id, buyer_id, total, status, payment_method FROM orders WHERE id=$1', [orderId])).rows[0];
+      if (!dbCheck || String(dbCheck.buyer_id) !== String(req.user.id)) throw fail(404, 'Buyurtma topilmadi.');
+      if (dbCheck.payment_method !== 'click' || dbCheck.status !== 'awaiting_payment') throw fail(409, 'Bu buyurtma allaqachon yakunlangan.');
+
+      let gatewayTxId;
+      if (pending.mode === 'click') {
+        const verifyRes = await fetch('https://api.click.uz/v2/merchant/card_token/verify', {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', Auth: clickAuthHeader() },
+          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_token: pending.cardToken, sms_code: smsCode }),
+          signal: AbortSignal.timeout(15_000)
+        });
+        const verifyData = await verifyRes.json().catch(() => null);
+        if (!verifyRes.ok || Number(verifyData?.error_code) !== 0) {
+          throw fail(400, String(verifyData?.error_note || 'SMS tasdiqlash kodi noto‘g‘ri.'));
+        }
+        const payRes = await fetch('https://api.click.uz/v2/merchant/card_token/payment', {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', Auth: clickAuthHeader() },
+          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_token: pending.cardToken, amount: dbCheck.total, transaction_param: dbCheck.id }),
+          signal: AbortSignal.timeout(15_000)
+        });
+        const payData = await payRes.json().catch(() => null);
+        if (!payRes.ok || Number(payData?.error_code) !== 0) {
+          throw fail(400, String(payData?.error_note || 'Kartadan mablag‘ yechishda xatolik yuz berdi.'));
+        }
+        gatewayTxId = String(payData.payment_id || verifyData.card_token || ('click-' + Date.now()));
+      } else {
+        if (smsCode !== pending.sandboxOtp) throw fail(400, 'Sinov SMS kodi noto‘g‘ri.');
+        gatewayTxId = 'sandbox-card-' + Date.now();
+      }
+
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        const o = (await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [orderId])).rows[0];
+        if (!o || o.status !== 'awaiting_payment') throw fail(409, 'Buyurtma holati o‘zgargan.');
+        await db.query(
+          "INSERT INTO payment_transactions(gateway,gateway_id,order_id,amount,state,create_time,perform_time) VALUES('click',$1,$2,$3,2,$4,$4)",
+          [gatewayTxId, o.id, o.total, Date.now()]
+        );
+        await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1", [o.id]);
+        await db.query('COMMIT');
+        pendingCardTokens.delete(key);
+        res.json({ ok: true, id: o.id, status: 'new', paymentStatus: 'paid', redirect: '/pay/' + o.id, message: 'To‘lov tasdiqlandi va belgilangan summa yechildi!' });
+      } catch (e) {
+        await db.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        db.release();
+      }
+    }));
+  }
 }

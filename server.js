@@ -22,7 +22,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { products as samples, featuredSamples, regions } from './seed.js';
 import { defaults, validateSite, seasonalState, assetUrl } from './site-config.js';
-import { isClickSandboxAllowed, mountPayments } from './payment-handlers.js';
+import { clickCardApiReady, isClickSandboxAllowed, mountPayments } from './payment-handlers.js';
 import { canAdvanceOrder, checkoutContainsCardData } from './order-safety.js';
 import { buildInterests, rankProducts } from './recommendations.js';
 import { templateWorkbook, parseWorkbook } from './product-import.js';
@@ -82,7 +82,7 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   if (hasProtoPollution(req.body)) return res.status(400).json({ error: 'So‘rov tarkibi noto‘g‘ri.' });
   if (!['GET','HEAD','OPTIONS'].includes(req.method)) {
-    if(req.path.startsWith('/payments/')||req.path==='/telegram/webhook') return next(); // Provider signatures/auth are validated by their handlers.
+    if(['/payments/payme','/payments/click/prepare','/payments/click/complete','/payments/click/sandbox-pay','/telegram/webhook'].includes(req.path)) return next(); // Provider signatures/auth are validated by their handlers.
     if (req.get('sec-fetch-site') === 'cross-site') return res.status(403).json({ error: 'So‘rov manbasi tasdiqlanmadi.' });
     const origin = req.get('origin');
     if (origin && (() => { try { return new URL(origin).host !== req.get('host'); } catch { return true; } })()) return res.status(403).json({ error: 'So‘rov manbasi tasdiqlanmadi.' });
@@ -101,8 +101,9 @@ const externalLinks = value => {
   if(!Array.isArray(value) || value.length>5) throw fail(400,'Mahsulot havolalari ko‘pi bilan 5 ta bo‘lsin.');
   return value.map(x=>{ const label=text(x?.label,45), url=text(x?.url,1000); if(!label || !imageOk(url) || !url.startsWith('https://')) throw fail(400,'Mahsulotning tashqi havolalari HTTPS bo‘lishi kerak.'); return {label,url}; });
 };
-const gatewayConfigured=gateway=>!demoOnly && (gateway==='payme'?!!(process.env.PAYME_MERCHANT_ID&&process.env.PAYME_KEY&&process.env.PAYME_LOGIN):(!!(process.env.CLICK_MERCHANT_ID&&process.env.CLICK_SERVICE_ID&&process.env.CLICK_SECRET_KEY)||isClickSandboxAllowed()));
-const paymentReady=gateway=>gatewayConfigured(gateway) && ((process.env.PAYMENTS_ENABLED==='true' && process.env.SHIPPING_INCLUDED_IN_PRICE==='true' && ['operator','taxId','address','phone','email','returnPolicy'].every(k=>!!site.legal[k])) || (gateway==='click' && isClickSandboxAllowed()));
+const allowCod=()=>process.env.ALLOW_COD==='true';
+const gatewayConfigured=gateway=>!demoOnly && (gateway==='payme'?!!(process.env.PAYME_MERCHANT_ID&&process.env.PAYME_KEY&&process.env.PAYME_LOGIN):(!!(process.env.CLICK_MERCHANT_ID&&process.env.CLICK_SERVICE_ID&&process.env.CLICK_SECRET_KEY)||clickCardApiReady()||isClickSandboxAllowed()));
+const paymentReady=gateway=>gatewayConfigured(gateway) && ((process.env.PAYMENTS_ENABLED==='true' && process.env.SHIPPING_INCLUDED_IN_PRICE==='true' && ['operator','taxId','address','phone','email','returnPolicy'].every(k=>!!site.legal[k])) || (gateway==='click' && (clickCardApiReady() || isClickSandboxAllowed())));
 const paymentUrl=(gateway,id,total)=>{
   const ret=site.seo.siteUrl+'/pay/'+id;
   if(gateway==='payme') return 'https://checkout.paycom.uz/'+Buffer.from(`m=${process.env.PAYME_MERCHANT_ID};ac.order_id=${id};a=${total*100};l=uz;c=${encodeURIComponent(ret)}`).toString('base64');
@@ -173,7 +174,7 @@ const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Da
 setInterval(() => { for (const [key, value] of authHits) if (value.until < Date.now()) authHits.delete(key); }, 20 * 60_000).unref();
 
 app.get('/api/healthz', route(async (req, res) => { if (pool) await pool.query('SELECT 1'); res.json({ ok: true, database: pool ? 'ready' : 'preview' }); }));
-app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, telegramBotUsername, otpMode:otpMode(), smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function'), mockSms:!demoOnly&&isMockSmsAllowed(), clickSandbox:!demoOnly&&isClickSandboxAllowed() }));
+app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['click',...['payme'].filter(paymentReady),...(allowCod()?['cod']:[])], clickCardReady:clickCardApiReady(), shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, telegramBotUsername, otpMode:otpMode(), smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function'), mockSms:!demoOnly&&isMockSmsAllowed(), clickSandbox:!demoOnly&&isClickSandboxAllowed() }));
 app.get('/media/:id', requireDb, route(async (req,res)=>{
   if(!/^[0-9a-f-]{36}$/.test(req.params.id)) throw fail(404,'Rasm topilmadi.');
   const {rows}=await pool.query('SELECT mime,bytes FROM site_assets WHERE id=$1',[req.params.id]);
@@ -617,7 +618,8 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
   if(body.agree!==true && body.agree!=='on') throw fail(400,'Buyurtma shartlarini tasdiqlang.');
   if (recipient.length < 2 || !/^\+?[\d\s()-]{9,25}$/.test(phone) || !regions.includes(region) || district.length < 2 || address.length < 5) throw fail(400, 'Qabul qiluvchi va manzil ma’lumotlarini to‘liq kiriting.');
   const method=text(body.paymentMethod,20);
-  if(method!=='cod' && !(['click','payme'].includes(method) && paymentReady(method))) throw fail(400,'Tanlangan to‘lov usuli hozir faol emas.');
+  if(method==='cod' && process.env.NODE_ENV==='production' && !allowCod()) throw fail(400,'Hozir faqat oldindan karta orqali to‘lov qabul qilinadi.');
+  if(!['click','cod'].includes(method) && !(method==='payme' && paymentReady('payme'))) throw fail(400,'Tanlangan to‘lov usuli hozir faol emas.');
   if (!Array.isArray(body.items) || !body.items.length || body.items.length > 30) throw fail(400, 'Savat bo‘sh yoki juda katta.');
   const items = body.items.map(x => ({ id: Number(x.id), variantId:x.variantId?Number(x.variantId):null, qty: Number(x.qty) }));
   if (items.some(x => !Number.isSafeInteger(x.id) || x.id < 1 || !Number.isSafeInteger(x.qty) || x.qty < 1 || x.qty > 20 || (x.variantId!==null&&(!Number.isSafeInteger(x.variantId)||x.variantId<1))) || new Set(items.map(x => `${x.id}:${x.variantId||''}`)).size !== items.length) throw fail(400, 'Savat ma’lumotlari xato.');
@@ -672,7 +674,7 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
       body: method === 'cod' ? 'Operator tasdiqlashi kutilmoqda.' : 'Onlayn to‘lovni yakunlang.',
       href: '/account?tab=orders'
     });
-    await db.query('COMMIT'); res.status(201).json({ id, subtotal, discountAmount, total: finalTotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:paymentUrl(method,id,finalTotal), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. To‘lovni xavfsiz oynada yakunlang.' });
+    await db.query('COMMIT'); res.status(201).json({ id, subtotal, discountAmount, total: finalTotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:(method==='click'?`/pay/${id}`:paymentUrl(method,id,finalTotal)), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. Karta orqali to‘lovni yakunlash uchun to‘lov sahifasiga o‘ting.' });
   } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
 }));
 app.get('/api/orders', requireDb, auth, route(async (req, res) => {
@@ -686,10 +688,11 @@ app.get('/api/orders/:id/payment', requireDb, auth, route(async(req,res)=>{
   if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(req.params.id)) throw fail(404,'Buyurtma topilmadi.');
   const o=(await pool.query('SELECT id,total,status,payment_method,payment_status,tracking_number,created_at FROM orders WHERE id=$1 AND buyer_id=$2',[req.params.id,req.user.id])).rows[0];
   if(!o) throw fail(404,'Buyurtma topilmadi.');
-  const pending=o.status==='awaiting_payment' && paymentReady(o.payment_method);
+  const pending=o.status==='awaiting_payment' && (o.payment_method==='click' || paymentReady(o.payment_method));
   res.json({id:o.id,total:o.total,status:o.status,paymentStatus:o.payment_status,method:o.payment_method,createdAt:o.created_at,trackingNumber:o.tracking_number,
-    paymentUrl:pending?paymentUrl(o.payment_method,o.id,o.total):null,
-    clickWidget:pending&&o.payment_method==='click'&&process.env.CLICK_INLINE_ENABLED==='true'&&!!process.env.CLICK_MERCHANT_USER_ID
+    paymentUrl:o.status==='awaiting_payment'&&paymentReady(o.payment_method)?paymentUrl(o.payment_method,o.id,o.total):null,
+    clickCardApi:pending&&o.payment_method==='click',
+    clickWidget:pending&&o.payment_method==='click'&&paymentReady('click')&&process.env.CLICK_INLINE_ENABLED==='true'&&!!process.env.CLICK_MERCHANT_USER_ID
       ?{service_id:process.env.CLICK_SERVICE_ID,merchant_id:process.env.CLICK_MERCHANT_ID,merchant_user_id:process.env.CLICK_MERCHANT_USER_ID,amount:o.total.toFixed(2),transaction_param:o.id}:null
   });
 }));
@@ -855,7 +858,7 @@ app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (
   }catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
 }));
 
-mountPayments(app,pool,gatewayConfigured);
+mountPayments(app,pool,gatewayConfigured,{auth,route,fail,requireDb});
 mountMarketplaceFeatures(app,{pool,requireDb,auth,role,route,fail,text,idParam});
 
 const htmlEsc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

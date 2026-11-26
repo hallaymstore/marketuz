@@ -243,10 +243,17 @@ async function renderCart() {
   return `${crumbs(['Savat'])}<div class="page-heading"><span class="eyebrow">Sizning tanlovingiz</span><h1>Savatim</h1><p>Yoqtirgan mahsulotlaringizni bir joyda ko‘ring.</p></div>${!p.length?empty('Savat hozircha bo‘sh','Mahsulotlarni ko‘rib, o‘zingizga yoqqanini savatga qo‘shing.','Katalogni ko‘rish','/catalog'): `<div class="cart-layout"><div class="cart-list">${p.map(x=>`<article class="cart-item">${img(x.image_url,x.name)}<div><a href="/product/${x.id}" data-link><h3>${esc(x.name)}</h3></a><small>${esc(state.config.categories.find(c=>c.id===x.category)?.name||'Marketuz')}</small><div class="item-price">${money(x.price)}</div></div><div class="cart-right"><strong>${money(x.price*x.qty)}</strong><div class="quantity-picker"><button data-action="cart-qty" data-id="${x.id}" data-variant="${x.variantId||''}" data-delta="-1" aria-label="Soni kamaytirish">−</button><span>${x.qty}</span><button data-action="cart-qty" data-id="${x.id}" data-variant="${x.variantId||''}" data-delta="1" aria-label="Soni oshirish">+</button></div><button class="text-button" data-action="cart-remove" data-id="${x.id}" data-variant="${x.variantId||''}">O‘chirish</button></div></article>`).join('')}</div>${summary(p)}</div>`}`;
 }
 function paymentChoices(products) {
-  const available=state.config.payments.filter(x=>x==='cod'||!products.some(p=>p.stock_mode==='replenishable'));
+  const configured=Array.isArray(state.config.payments)?state.config.payments:['click'];
+  const hasReplenishable=products.some(p=>p.stock_mode==='replenishable');
+  const available=configured.filter(x=>x==='cod'||x==='click'||!hasReplenishable);
+  if(!available.length) available.push('click');
   available.sort((a,b)=>({click:0,payme:1,cod:2}[a]-{click:0,payme:1,cod:2}[b]));
-  const info={click:['Karta bilan · Click','Click ilovasi shart emas. Karta faqat Click’ning xavfsiz oynasiga kiritiladi.'],payme:['Karta bilan · Payme','Karta Payme to‘lov sahifasiga kiritiladi.'],cod:['Yetkazilganda to‘lash','Buyurtmani hozir yuboring, to‘lov shartlari operator bilan kelishiladi.']};
-  return `<fieldset class="payment-selector full"><legend>To‘lov usuli</legend><div class="payment-choice-grid">${available.map((method,i)=>`<label class="payment-choice"><input type="radio" name="paymentMethod" value="${method}" ${i===0?'checked':''} required><span class="payment-choice-body"><span class="payment-choice-icon">${icon(method==='cod'?'truck':'shield')}</span><span><strong>${info[method][0]}</strong><small>${info[method][1]}</small></span><span class="payment-choice-tick">✓</span></span></label>`).join('')}</div><p class="payment-disclaimer">Marketuz karta raqami, amal qilish muddati yoki CVV ni so‘ramaydi va saqlamaydi. To‘lov holati faqat provayder tasdig‘idan keyin yangilanadi.</p></fieldset>`;
+  const info={
+    click:['Karta bilan oldindan to‘lash · Click','Alohida xavfsiz to‘lov sahifasida karta raqami, amal muddati va SMS kod bilan to‘lanadi.'],
+    payme:['Karta bilan · Payme','Karta Payme to‘lov sahifasiga kiritiladi.'],
+    cod:['Yetkazilganda to‘lash','Buyurtmani hozir yuboring, to‘lov shartlari operator bilan kelishiladi.']
+  };
+  return `<fieldset class="payment-selector full"><legend>To‘lov usuli</legend><div class="payment-choice-grid">${available.map((method,i)=>`<label class="payment-choice"><input type="radio" name="paymentMethod" value="${method}" ${i===0?'checked':''} required><span class="payment-choice-body"><span class="payment-choice-icon">${icon(method==='cod'?'truck':'shield')}</span><span><strong>${info[method][0]}</strong><small>${info[method][1]}</small></span><span class="payment-choice-tick">✓</span></span></label>`).join('')}</div><p class="payment-disclaimer">Buyurtma yaratilgach alohida to‘lov sahifasi ochiladi. Karta raqami va amal muddati bazamizda saqlanmaydi; faqat Click API orqali SMS tasdiqlashdan so‘ng belgilangan summa yechiladi.</p></fieldset>`;
 }
 function setAuthNext(path) {
   const safe = typeof path === 'string' && /^\/(?!\/)/.test(path) ? path : '';
@@ -328,13 +335,26 @@ async function renderPayment(id) {
   if(!state.user){setAuthNext('/pay/'+id);return `${crumbs(['To‘lov'])}${renderAuth(defaultAuthMode(),true)}`;}
   const p=await api('/orders/'+encodeURIComponent(id)+'/payment');
   state.payment=p;
-  const paid=p.paymentStatus==='paid',pending=p.status==='awaiting_payment'&&!!p.paymentUrl;
-  const isSandboxOpen=pending&&state.config?.clickSandbox&&p.paymentUrl?.startsWith('/api/payments/click/sandbox-pay')&&new URLSearchParams(location.search).get('sandbox')==='1';
-  if(isSandboxOpen){
-    return `${crumbs(['Buyurtmalar','/account?tab=orders'],['To‘lov','/pay/'+p.id],['Click Sandbox'])}<div class="page-heading"><span class="eyebrow">Sinov to‘lov oynasi</span><h1>Click karta orqali to‘lov</h1><p>Buyurtma #${esc(p.id.slice(0,8).toUpperCase())} · ${money(p.total)}</p></div><section class="payment-page"><div class="payment-panel"><div class="payment-emblem">${icon('shield')}</div><span class="eyebrow">CLICK SANDBOX · SINOV OYNASI</span><h2>${money(p.total)}</h2><p>Bu sinov muhiti uchun bir martalik karta to‘lov oynasi simulyatsiyasi. Haqiqiy pul yechilmaydi; tasdiqlash buyurtmani bazada to‘langan holatga o‘tkazadi.</p><form data-form="click-sandbox" data-id="${esc(p.id)}" class="form-grid"><label class="field full">Sinov karta raqami (Uzcard / Humo)<input name="testCard" value="8600 0000 0000 0001" maxlength="19" required></label><label class="field">Amal muddati<input name="testExpiry" value="12/28" maxlength="5" required></label><label class="field">To‘lov turi<input value="Bir martalik xarid" disabled></label><button class="btn btn-primary full" type="submit">To‘lovni tasdiqlash →</button><button class="btn btn-outline full" type="button" data-action="click-sandbox-cancel" data-id="${esc(p.id)}">Bekor qilish</button></form></div><aside class="payment-assurance"><span class="payment-assurance-art">✳</span><h3>Karta ma’lumotlari Marketuzga saqlanmaydi</h3><p>Haqiqiy muhitda karta faqat Click to‘lov shlyuziga kiritiladi. Hozir Click API ulanishi kutilayotgani sababli sinov oynasi yoqilgan.</p><div><span>${icon('shield')} Click Sandbox</span><span>${icon('check')} Bir martalik xarid</span><span>${icon('lock')} Production’da o‘chirilgan</span></div></aside></section>`;
+  if(p.paymentStatus==='paid'||p.status!=='awaiting_payment') state.cardPay=null;
+  const paid=p.paymentStatus==='paid',pending=p.status==='awaiting_payment';
+  const cardState=state.cardPay?.orderId===p.id?state.cardPay:null;
+  const hasExternalHosted=pending&&p.paymentUrl&&(/^https:\/\//.test(p.paymentUrl));
+  let panelBody='';
+  if(paid){
+    panelBody=`<p>To‘lov serverga kelgan tasdiq orqali tekshirildi va belgilangan summa yechildi. Buyurtmangiz tayyorlashga yuborildi.</p><a href="/account?tab=orders" data-link class="btn btn-primary">Buyurtmalarimga o‘tish</a>`;
+  } else if(pending && p.method==='click'){
+    const modeNote=state.config?.clickSandbox?'<p class="summary-note">Sinov muhiti (`CLICK_SANDBOX_MOCK`): SMS kodi shu oynada chiqadi va haqiqiy pul yechilmaydi.</p>':(!state.config?.clickCardReady?'<p class="summary-note">Click Merchant API kalitlari (CLICK_SERVICE_ID, CLICK_SECRET_KEY, CLICK_MERCHANT_USER_ID) Render’ga kiritilgach haqiqiy SMS va yechish ishga tushadi.</p>':'');
+    if(cardState){
+      panelBody=`<p><strong>${esc(cardState.maskedCard)}</strong> kartasiga bog‘langan raqamga SMS kod yuborildi. Kodni kiriting va <strong>${money(p.total)}</strong> yechilishini tasdiqlang.</p>${cardState.sandboxSmsCode?`<div class="dev-sms-box"><div class="dev-sms-head"><strong>Sinov bank SMS kodi</strong><small>${esc(cardState.maskedCard)}</small></div><p>Click sinov tasdiqlash kodi: <strong>${esc(cardState.sandboxSmsCode)}</strong></p><button type="button" class="small-btn" data-action="fill-card-otp" data-code="${esc(cardState.sandboxSmsCode)}">Kodni qo‘yish (${esc(cardState.sandboxSmsCode)})</button></div>`:''}<form data-form="click-card-verify" data-id="${esc(p.id)}" class="form-grid"><label class="field full">SMS tasdiqlash kodi<input name="smsCode" data-otp-input="true" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required placeholder="SMS orqali kelgan kod"></label><button class="btn btn-primary full" type="submit">${money(p.total)} to‘lash va tasdiqlash ✓</button><button class="btn btn-outline full" type="button" data-action="click-card-reset">Boshqa karta kiritish</button></form>${modeNote}`;
+    } else {
+      panelBody=`<p>Oldindan to‘lovni yakunlash uchun Uzcard yoki Humo karta raqami va amal qilish muddatini kiriting. Keyingi qadamda SMS kod orqali <strong>${money(p.total)}</strong> yechiladi.</p><form data-form="click-card-request" data-id="${esc(p.id)}" class="form-grid"><label class="field full">Karta raqami (Uzcard / Humo)<input name="cardNumber" data-card-number="true" autocomplete="cc-number" inputmode="numeric" maxlength="19" required placeholder="8600 0000 0000 0000"></label><label class="field">Amal qilish muddati (Oy/Yil)<input name="expireDate" data-card-expiry="true" autocomplete="cc-exp" inputmode="numeric" maxlength="5" required placeholder="OO/YY"></label><label class="field">Yechiladigan summa<input value="${esc(money(p.total))}" disabled></label><button class="btn btn-primary full" type="submit">SMS tasdiqlash kodi olish →</button></form>${hasExternalHosted?`<div class="payment-actions"><button class="btn btn-outline" data-action="pay-external" data-id="${esc(p.id)}">Yoki Click.uz oynasida to‘lash ↗</button></div>`:''}${modeNote}`;
+    }
+  } else if(pending && p.paymentUrl){
+    panelBody=`<p>To‘lovni provayder oynasi orqali yakunlang.</p><div class="payment-actions"><button class="btn btn-primary" data-action="pay-external" data-id="${esc(p.id)}">${icon('lock')} Himoyalangan to‘lov oynasini ochish</button><button class="small-btn" data-action="payment-refresh" data-id="${esc(p.id)}">To‘lov holatini tekshirish</button></div>`;
+  } else {
+    panelBody=`<p>Holatni buyurtmalar sahifasida kuzatishingiz mumkin.</p><a href="/account?tab=orders" data-link class="btn btn-primary">Buyurtmalarimga o‘tish</a>`;
   }
-  const sandboxNotice=pending&&state.config?.clickSandbox&&p.paymentUrl?.startsWith('/api/payments/click/sandbox-pay')?'<p class="summary-note">Sinov muhiti: Click bir martalik karta to‘lov oynasi simulyatori faol (haqiqiy karta yechilmaydi).</p>':'';
-  return `${crumbs(['Buyurtmalar','/account?tab=orders'],['To‘lov'])}<div class="page-heading"><span class="eyebrow">Xavfsiz xarid</span><h1>${paid?'To‘lov tasdiqlandi':pending?'Buyurtma to‘lovi':'Buyurtma holati'}</h1><p>Buyurtma #${esc(p.id.slice(0,8).toUpperCase())}</p></div><section class="payment-page"><div class="payment-panel"><div class="payment-emblem">${icon(paid?'check':'shield')}</div><span class="eyebrow">${p.method==='click'?'CLICK TO‘LOVI':p.method==='payme'?'PAYME TO‘LOVI':'BUYURTMA'}</span><h2>${paid?'Xaridingiz qabul qilindi':pending?money(p.total):p.status==='cancelled'?'Buyurtma bekor qilingan':'Buyurtma qabul qilingan'}</h2><p>${paid?'To‘lov serverga kelgan tasdiq orqali tekshirildi. Buyurtmangiz tayyorlashga yuborildi.':pending?'Kartangizni Click yoki Payme tomonidan ochilgan to‘lov oynasiga kiriting. Ularning ilovasi bo‘lishi shart emas.':'Holatni buyurtmalar sahifasida kuzatishingiz mumkin.'}</p>${pending?`<div class="payment-actions">${p.clickWidget?`<button class="btn btn-primary" data-action="pay-inline" data-id="${esc(p.id)}">${icon('lock')} Shu yerda karta bilan to‘lash</button>`:`<button class="btn btn-primary" data-action="pay-external" data-id="${esc(p.id)}">${icon('lock')} Himoyalangan to‘lov oynasini ochish</button>`}${p.clickWidget?`<button class="btn btn-outline" data-action="pay-external" data-id="${esc(p.id)}">Click sahifasida ochish ↗</button>`:''}<button class="small-btn" data-action="payment-refresh" data-id="${esc(p.id)}">To‘lov holatini tekshirish</button></div>${sandboxNotice}<p class="payment-wait" id="payment-wait" aria-live="polite">To‘lov tasdig‘i kutilmoqda. Oynani yopib qaytsangiz ham holat shu yerda yangilanadi.</p>`:`<a href="/account?tab=orders" data-link class="btn btn-primary">Buyurtmalarimga o‘tish</a>`}</div><aside class="payment-assurance"><span class="payment-assurance-art">✳</span><h3>Karta ma’lumotlari bizga kelmaydi</h3><p>Karta raqami, amal qilish muddati va CVV Marketuz formasi, serveri yoki bazasidan o‘tmaydi. Faqat buyurtma raqami, summa va to‘lovning tasdiqlangan holati saqlanadi.</p><div><span>${icon('shield')} Provayder oynasi</span><span>${icon('check')} Bir martalik xarid</span><span>${icon('lock')} Imzolangan tasdiq</span></div></aside></section>`;
+  return `${crumbs(['Buyurtmalar','/account?tab=orders'],['To‘lov'])}<div class="page-heading"><span class="eyebrow">Xavfsiz oldindan to‘lov</span><h1>${paid?'To‘lov tasdiqlandi':pending?'Karta orqali to‘lov':'Buyurtma holati'}</h1><p>Buyurtma #${esc(p.id.slice(0,8).toUpperCase())}</p></div><section class="payment-page"><div class="payment-panel"><div class="payment-emblem">${icon(paid?'check':'shield')}</div><span class="eyebrow">${p.method==='click'?'CLICK KARTA TO‘LOVI':p.method==='payme'?'PAYME TO‘LOVI':'BUYURTMA'}</span><h2>${paid?'Xaridingiz qabul qilindi':pending?money(p.total):p.status==='cancelled'?'Buyurtma bekor qilingan':'Buyurtma qabul qilingan'}</h2>${panelBody}</div><aside class="payment-assurance"><span class="payment-assurance-art">✳</span><h3>Himoyalangan Click oqimi</h3><p>Karta raqami va amal muddati bizning bazamizga saqlanmaydi. Click API kartangizga bog‘langan telefonga SMS kod yuboradi va faqat tasdiqdan keyin belgilangan summa yechiladi.</p><div><span>${icon('shield')} Click API v2</span><span>${icon('check')} SMS tasdiqlash</span><span>${icon('lock')} Karta saqlanmaydi</span></div></aside></section>`;
 }
 function renderAuth(mode='login',embedded=false) {
   const register=mode==='register'||mode==='phone-register';
@@ -590,7 +610,17 @@ async function submitForm(form) {
         items:products.map(x=>({id:x.id,variantId:x.variantId,qty:x.qty}))
       };
       const order=await api('/orders',{method:'POST',body:JSON.stringify(payload)});
-      state.checkoutKey=null;try{localStorage.removeItem('marketuz_checkout_key');}catch{}state.cart=[];saveLocal('marketuz_cart',state.cart);syncCartServer();notify(order.message);nav(order.paymentUrl?'/pay/'+order.id:'/account?tab=orders');
+      state.checkoutKey=null;try{localStorage.removeItem('marketuz_checkout_key');}catch{}state.cart=[];saveLocal('marketuz_cart',state.cart);syncCartServer();notify(order.message);nav(order.status==='awaiting_payment'||order.paymentUrl?'/pay/'+order.id:'/account?tab=orders');
+    } else if(kind==='click-card-request') {
+      const r=await api('/payments/click/card-request',{method:'POST',body:JSON.stringify({orderId:form.dataset.id,cardNumber:v.cardNumber,expireDate:v.expireDate})});
+      state.cardPay={orderId:form.dataset.id,maskedCard:r.maskedCard,phoneNumber:r.phoneNumber||'',sandboxSmsCode:r.sandboxSmsCode||''};
+      notify(r.message||'SMS tasdiqlash kodi yuborildi.');
+      render();
+    } else if(kind==='click-card-verify') {
+      const r=await api('/payments/click/card-verify',{method:'POST',body:JSON.stringify({orderId:form.dataset.id,smsCode:v.smsCode})});
+      state.cardPay=null;
+      notify(r.message||'To‘lov tasdiqlandi!');
+      nav('/pay/'+encodeURIComponent(form.dataset.id));
     } else if(kind==='click-sandbox') {
       const r=await api('/payments/click/sandbox-pay',{method:'POST',body:JSON.stringify({orderId:form.dataset.id,decision:'pay',testCard:v.testCard,testExpiry:v.testExpiry})});
       notify('To‘lov muvaffaqiyatli tasdiqlandi!');
@@ -760,6 +790,8 @@ async function actionOf(button) {
   }
   if(action==='add-cart') { let p=state.products.get(String(id))||(await api('/products/'+id)).product;if(p.variant_count&&!p.variants){p=(await api('/products/'+id)).product;state.products.set(String(id),p);}const variantId=p.variant_count?$('.variant-choices button.active')?.dataset.id:null;const variant=variantId?p.variants?.find(x=>String(x.id)===String(variantId)):null;if(p.variant_count&&!variant)return notify('Avval rang yoki o‘lcham variantini tanlang.',true);const available=variant?.stock??p.stock;if(p.stock_mode!=='replenishable'&&available<1)return notify('Mahsulot hozircha tugagan.',true);const item=state.cart.find(x=>String(x.id)===String(id)&&String(x.variantId||'')===String(variantId||''));if(item)item.qty=Math.min(p.stock_mode==='replenishable'?20:Math.min(available,20),Number(item.qty)+1);else state.cart.push({id:Number(id),variantId:variantId?Number(variantId):null,qty:1});saveLocal('marketuz_cart',state.cart);syncCartServer();headerUpdate();recordInterest('cart',{productId:Number(id)});notify('Mahsulot savatga qo‘shildi.');return;}
   if(action==='resume-payment'){nav('/pay/'+id);return;}
+  if(action==='click-card-reset'){state.cardPay=null;render();return;}
+  if(action==='fill-card-otp'){const inp=$('form[data-form="click-card-verify"] input[name="smsCode"]');if(inp){inp.value=button.dataset.code||'';inp.focus();}return;}
   if(action==='click-sandbox-cancel'){const r=await api('/payments/click/sandbox-pay',{method:'POST',body:JSON.stringify({orderId:id,decision:'cancel'})});notify('To‘lov bekor qilindi.');nav(r.redirect||('/pay/'+id));return;}
   if(action==='payment-refresh'){const p=await refreshPayment(id);if(p.paymentStatus!=='paid')notify('To‘lov tasdig‘i hali kelmadi.');return;}
   if(action==='pay-external'){const p=await api('/orders/'+id+'/payment');if(!p.paymentUrl)return notify('To‘lov havolasi hozir mavjud emas.',true);openPayment(p.paymentUrl);return;}
@@ -921,8 +953,19 @@ document.addEventListener('input',event=>{
     if(el.value!==formatted) el.value=formatted;
   }
   if(el.matches('[data-otp-input]')){
-    const clean=el.value.replace(/\D/g,'').slice(0,6);
+    const maxLen=Number(el.getAttribute('maxlength'))||6;
+    const clean=el.value.replace(/\D/g,'').slice(0,maxLen);
     if(el.value!==clean) el.value=clean;
+  }
+  if(el.matches('[data-card-number]')){
+    const digits=el.value.replace(/\D/g,'').slice(0,16);
+    const fmt=digits.replace(/(.{4})/g,'$1 ').trim();
+    if(el.value!==fmt) el.value=fmt;
+  }
+  if(el.matches('[data-card-expiry]')){
+    const digits=el.value.replace(/\D/g,'').slice(0,4);
+    const fmt=digits.length>2?digits.slice(0,2)+'/'+digits.slice(2):digits;
+    if(el.value!==fmt) el.value=fmt;
   }
   if(el.matches('[data-strength-input]')){
     const meter=el.closest('.field')?.querySelector('[data-strength-meter]');
