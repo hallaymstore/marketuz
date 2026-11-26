@@ -37,8 +37,14 @@ export const eskizConfigured = () =>
   process.env.SMS_ENABLED === 'true' &&
   !!(process.env.ESKIZ_EMAIL && process.env.ESKIZ_PASSWORD && otpSecretValue().length >= 32);
 
+export const telegramOtpConfigured = () =>
+  !!(process.env.TELEGRAM_BOT_TOKEN && otpSecretValue().length >= 32);
+
+export const otpMode = () =>
+  eskizConfigured() ? 'sms' : telegramOtpConfigured() ? 'telegram' : isMockSmsAllowed() ? 'mock' : 'none';
+
 export const smsReady = () =>
-  eskizConfigured() || (isMockSmsAllowed() && otpSecretValue().length >= 32);
+  eskizConfigured() || telegramOtpConfigured() || (isMockSmsAllowed() && otpSecretValue().length >= 32);
 
 let token = null;
 let tokenUntil = 0;
@@ -147,18 +153,49 @@ function safeHexEqual(aHex, bHex) {
 
 export function mountPhoneAuth(
   app,
-  { pool, requireDb, auth, rateAuth, route, fail, hashPassword, verifyPassword, createSession, revokeUserSessions, smsTransport = null }
+  { pool, requireDb, auth, rateAuth, route, fail, hashPassword, verifyPassword, createSession, revokeUserSessions, smsTransport = null, telegramTransport = null, getTelegramBotUsername = () => '' }
 ) {
   const activeReady = () => smsReady() || (process.env.NODE_ENV !== 'production' && typeof smsTransport === 'function');
 
   const ready = () => {
-    if (!activeReady()) throw fail(503, 'SMS xizmati hozircha mavjud emas.');
+    if (!activeReady()) throw fail(503, 'SMS yoki Telegram OTP xizmati hozircha sozlanmagan.');
   };
 
   const phoneOf = value => {
     const phone = normalizePhone(value);
     if (!phone) throw fail(400, 'Telefon raqamini +998 XX XXX XX XX ko‘rinishida kiriting.');
     return phone;
+  };
+
+  const botUrlFor = (purpose = 'register') => {
+    const uname = String(getTelegramBotUsername?.() || process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
+    return uname ? `https://t.me/${uname}?start=otp_${purpose}` : '';
+  };
+
+  const sendViaTelegram = async ({ phone, code, purpose }) => {
+    const link = (await pool.query('SELECT chat_id FROM telegram_phone_links WHERE phone=$1', [phone])).rows[0];
+    if (!link) {
+      throw Object.assign(
+        fail(409, 'Avval Telegram botimizga kirib "Telefon raqamimni ulashish" tugmasini bosing, so‘ng kod olishni bosing.'),
+        { extra: { needsTelegramLink: true, botUrl: botUrlFor(purpose) } }
+      );
+    }
+    const text = `Marketuz tasdiqlash kodi: <b>${code}</b>\n\nKod 5 daqiqa amal qiladi. Uni hech kimga bermang.`;
+    if (process.env.NODE_ENV !== 'production' && typeof telegramTransport === 'function') {
+      return telegramTransport({ phone, code, purpose, chatId: link.chat_id, text });
+    }
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: link.chat_id, text, parse_mode: 'HTML' }),
+      signal: AbortSignal.timeout(12_000)
+    });
+    const payload = await res.json().catch(() => null);
+    if (!res.ok || !payload?.ok) {
+      throw new Error('Telegram OTP delivery failed');
+    }
+    return { providerId: String(payload.result?.message_id || 'tg'), status: 'telegram', channel: 'telegram' };
   };
 
   const dispatchSms = async ({ phone, code, purpose }) => {
@@ -168,12 +205,38 @@ export function mountPhoneAuth(
     if (isMockSmsAllowed()) {
       const msg = smsMessageFor(purpose, code);
       recordDevSms({ phone, code, purpose, message: msg });
-      return { providerId: `mock-${Date.now()}`, status: 'mock' };
+      return { providerId: `mock-${Date.now()}`, status: 'mock', channel: 'mock' };
     }
-    return sendViaEskiz({ phone, code, purpose });
+    if (eskizConfigured()) {
+      const out = await sendViaEskiz({ phone, code, purpose });
+      return { ...out, channel: 'sms' };
+    }
+    if (telegramOtpConfigured()) {
+      const out = await sendViaTelegram({ phone, code, purpose });
+      return { ...out, channel: 'telegram' };
+    }
+    throw fail(503, 'OTP xizmati sozlanmagan.');
   };
 
   async function issueOtp({ phone, purpose, ip, skipProvider = false }) {
+    const usesTelegramOnly =
+      !skipProvider &&
+      !(process.env.NODE_ENV !== 'production' && typeof smsTransport === 'function') &&
+      !isMockSmsAllowed() &&
+      !eskizConfigured() &&
+      telegramOtpConfigured();
+    if (usesTelegramOnly) {
+      const linked = await pool.query('SELECT chat_id FROM telegram_phone_links WHERE phone=$1', [phone]);
+      if (!linked.rowCount) {
+        if (purpose === 'reset') {
+          return { ok: true, retryAfter: OTP_RESEND_SECONDS, channel: 'telegram' };
+        }
+        throw Object.assign(
+          fail(409, 'Avval Telegram botimizga kirib "Telefon raqamimni ulashish" tugmasini bosing, so‘ng kod olishni bosing.'),
+          { extra: { needsTelegramLink: true, botUrl: botUrlFor(purpose) } }
+        );
+      }
+    }
     const secret = otpSecretValue();
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
     const digest = otpDigest(phone, code, secret, purpose);
@@ -225,14 +288,15 @@ export function mountPhoneAuth(
         'UPDATE sms_requests SET status=$1, provider_id=$2 WHERE id=$3',
         [String(sent?.status || 'sent').slice(0, 20), String(sent?.providerId || '').slice(0, 120), reqId]
       ).catch(() => {});
-      return { ok: true, retryAfter: OTP_RESEND_SECONDS };
-    } catch {
+      return { ok: true, retryAfter: OTP_RESEND_SECONDS, channel: sent?.channel || 'sms' };
+    } catch (err) {
       await pool.query(
         'DELETE FROM phone_otps WHERE phone=$1 AND purpose=$2 AND digest=$3',
         [phone, purpose, digest]
       ).catch(() => {});
       await pool.query("UPDATE sms_requests SET status='failed' WHERE id=$1", [reqId]).catch(() => {});
-      throw fail(502, 'SMS yuborilmadi. Keyinroq urinib ko‘ring.');
+      if (err?.status) throw err;
+      throw fail(502, 'Tasdiqlash kodi yuborilmadi. Keyinroq urinib ko‘ring.');
     }
   }
 
@@ -294,11 +358,12 @@ export function mountPhoneAuth(
     }
 
     const result = await issueOtp({ phone, purpose, ip, skipProvider });
+    const viaTg = result.channel === 'telegram';
     res.json({
       ...result,
       message: purpose === 'reset'
-        ? 'Agar bu raqam tizimda mavjud bo‘lsa, SMS kod yuborildi.'
-        : 'Tasdiqlash kodi SMS orqali yuborildi.'
+        ? (viaTg ? 'Agar bu raqam tizimda mavjud va Telegram botga ulangan bo‘lsa, kod yuborildi.' : 'Agar bu raqam tizimda mavjud bo‘lsa, SMS kod yuborildi.')
+        : (viaTg ? 'Tasdiqlash kodi Telegram botingizga yuborildi.' : 'Tasdiqlash kodi SMS orqali yuborildi.')
     });
   }));
 
@@ -422,7 +487,10 @@ export function mountPhoneAuth(
     if (taken.rowCount) throw fail(409, 'Bu telefon raqami boshqa hisobga biriktirilgan.');
 
     const result = await issueOtp({ phone, purpose, ip: req.ip || 'unknown' });
-    res.json({ ...result, message: 'Tasdiqlash kodi yangi raqamga yuborildi.' });
+    res.json({
+      ...result,
+      message: result.channel === 'telegram' ? 'Tasdiqlash kodi Telegram botingizga yuborildi.' : 'Tasdiqlash kodi yangi raqamga yuborildi.'
+    });
   }));
 
   app.post('/api/me/phone/verify', requireDb, auth, rateAuth, route(async (req, res) => {

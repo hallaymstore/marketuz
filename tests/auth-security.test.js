@@ -314,3 +314,134 @@ test('Mock SMS dev-inbox works in non-production when SMS_MOCK=true and is stric
     if (prevSmsMock === undefined) delete process.env.SMS_MOCK; else process.env.SMS_MOCK = prevSmsMock;
   }
 });
+
+test('Telegram Bot OTP links verified contact, rejects spoofed contact, and completes registration/reset', async () => {
+  const prevEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+    SMS_ENABLED: process.env.SMS_ENABLED,
+    SMS_MOCK: process.env.SMS_MOCK,
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_BOT_USERNAME: process.env.TELEGRAM_BOT_USERNAME,
+    TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET,
+    DATABASE_URL: process.env.DATABASE_URL,
+    SESSION_SECRET: process.env.SESSION_SECRET,
+    OTP_SECRET: process.env.OTP_SECRET
+  };
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.SMS_ENABLED = 'false';
+    process.env.SMS_MOCK = 'false';
+    process.env.TELEGRAM_BOT_TOKEN = '123456:TEST_TELEGRAM_BOT_TOKEN';
+    process.env.TELEGRAM_BOT_USERNAME = 'marketuz_test_bot';
+    process.env.TELEGRAM_WEBHOOK_SECRET = 'tg_webhook_secret_test_value_123456';
+    process.env.DATABASE_URL = TEST_DB_URL;
+    process.env.SESSION_SECRET = 'test-session-secret-at-least-32-chars-long-001';
+    process.env.OTP_SECRET = 'test-otp-secret-at-least-32-chars-long-002';
+
+    const tgMessages = [];
+    const { app, pool, initialize } = createApp({
+      telegramTransport: async payload => {
+        tgMessages.push(payload);
+        return { providerId: `tg-${tgMessages.length}`, status: 'telegram', channel: 'telegram' };
+      }
+    });
+    await initialize();
+    const adminPool = new pg.Pool({ connectionString: TEST_DB_URL });
+    await adminPool.query('TRUNCATE TABLE telegram_phone_links, sms_requests, phone_otps, user_sessions, users RESTART IDENTITY CASCADE');
+
+    const server = await new Promise(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    try {
+      const cfg = await (await fetch(base + '/config')).json();
+      assert.equal(cfg.smsEnabled, true);
+      assert.equal(cfg.otpMode, 'telegram');
+      assert.equal(cfg.telegramBotUsername, 'marketuz_test_bot');
+
+      const phone = '+998 90 333 44 55';
+      // 1. Before linking in Telegram bot, /auth/phone/send returns 409 needsTelegramLink
+      const unlinked = await fetch(base + '/auth/phone/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, purpose: 'register' })
+      });
+      assert.equal(unlinked.status, 409);
+      const unlinkedData = await unlinked.json();
+      assert.equal(unlinkedData.needsTelegramLink, true);
+      assert.equal(unlinkedData.botUrl, 'https://t.me/marketuz_test_bot?start=otp_register');
+
+      // 2. Spoofed forwarded contact (contact.user_id !== from.id) is rejected cleanly
+      await fetch(base + '/telegram/webhook', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': process.env.TELEGRAM_WEBHOOK_SECRET
+        },
+        body: JSON.stringify({
+          message: {
+            chat: { id: 777001, type: 'private' },
+            from: { id: 777001, username: 'attacker' },
+            contact: { phone_number: '+998903334455', user_id: 999999 }
+          }
+        })
+      });
+      const stillUnlinked = await fetch(base + '/auth/phone/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, purpose: 'register' })
+      });
+      assert.equal(stillUnlinked.status, 409);
+
+      // 3. Genuine user contact link succeeds
+      const hookOk = await fetch(base + '/telegram/webhook', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Bot-Api-Secret-Token': process.env.TELEGRAM_WEBHOOK_SECRET
+        },
+        body: JSON.stringify({
+          message: {
+            chat: { id: 888002, type: 'private' },
+            from: { id: 888002, username: 'realbuyer' },
+            contact: { phone_number: '+998903334455', user_id: 888002 }
+          }
+        })
+      });
+      assert.equal(hookOk.status, 200);
+
+      // 4. Send OTP -> delivered via Telegram chatId 888002 -> register completes
+      const sendOk = await fetch(base + '/auth/phone/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, purpose: 'register' })
+      });
+      assert.equal(sendOk.status, 200);
+      const otpMsg = tgMessages.find(m => m.code && m.chatId === '888002' || m.chatId === 888002);
+      assert.ok(otpMsg);
+      assert.match(otpMsg.code, /^\d{6}$/);
+
+      const regOk = await fetch(base + '/auth/phone/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Telegram OTP User',
+          phone,
+          code: otpMsg.code,
+          password: 'StrongTgPass!2026',
+          agree: true
+        })
+      });
+      assert.equal(regOk.status, 201);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+      await pool?.end();
+      await adminPool.end();
+    }
+  } finally {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});

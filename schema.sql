@@ -326,3 +326,12 @@ CREATE TABLE IF NOT EXISTS notifications (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS telegram_phone_links (
+ phone VARCHAR(12) PRIMARY KEY,
+ chat_id BIGINT NOT NULL UNIQUE,
+ telegram_user_id BIGINT NOT NULL,
+ username VARCHAR(100) NOT NULL DEFAULT '',
+ verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_links_chat ON telegram_phone_links(chat_id);

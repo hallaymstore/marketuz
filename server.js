@@ -1,5 +1,5 @@
 import express from 'express';
-import { isMockSmsAllowed, mountPhoneAuth, smsReady } from './phone-auth.js';
+import { formatPhone, isMockSmsAllowed, mountPhoneAuth, normalizePhone, otpMode, smsReady } from './phone-auth.js';
 import {
   checkAuthLockout,
   deviceLabelFromUa,
@@ -35,7 +35,7 @@ const scrypt = promisify(scryptCallback);
 const root = path.dirname(fileURLToPath(import.meta.url));
 const shell = await readFile(path.join(root, 'public', 'index.html'), 'utf8');
 
-export function createApp({ smsTransport = null } = {}) {
+export function createApp({ smsTransport = null, telegramTransport = null } = {}) {
 const app = express();
 const demoOnly = !process.env.DATABASE_URL;
 if (!demoOnly && process.env.NODE_ENV === 'production' && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
@@ -43,6 +43,7 @@ if (!demoOnly && process.env.NODE_ENV === 'production' && (!process.env.SESSION_
 }
 const secret = process.env.SESSION_SECRET || randomBytes(48).toString('hex');
 let site = structuredClone(defaults);
+let telegramBotUsername = String(process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
 const pool = demoOnly ? null : new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   max: Number(process.env.DB_POOL_MAX || 10),
@@ -172,7 +173,7 @@ const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Da
 setInterval(() => { for (const [key, value] of authHits) if (value.until < Date.now()) authHits.delete(key); }, 20 * 60_000).unref();
 
 app.get('/api/healthz', route(async (req, res) => { if (pool) await pool.query('SELECT 1'); res.json({ ok: true, database: pool ? 'ready' : 'preview' }); }));
-app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function'), mockSms:!demoOnly&&isMockSmsAllowed(), clickSandbox:!demoOnly&&isClickSandboxAllowed() }));
+app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['cod',...['click','payme'].filter(paymentReady)], shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, telegramBotUsername, otpMode:otpMode(), smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function'), mockSms:!demoOnly&&isMockSmsAllowed(), clickSandbox:!demoOnly&&isClickSandboxAllowed() }));
 app.get('/media/:id', requireDb, route(async (req,res)=>{
   if(!/^[0-9a-f-]{36}$/.test(req.params.id)) throw fail(404,'Rasm topilmadi.');
   const {rows}=await pool.query('SELECT mime,bytes FROM site_assets WHERE id=$1',[req.params.id]);
@@ -322,7 +323,7 @@ app.get('/api/recommendations',route(async(req,res)=>{
   res.json({products,personalized});
 }));
 
-mountPhoneAuth(app,{pool,requireDb,auth,rateAuth,route,fail,hashPassword,verifyPassword,createSession,revokeUserSessions,smsTransport});
+mountPhoneAuth(app,{pool,requireDb,auth,rateAuth,route,fail,hashPassword,verifyPassword,createSession,revokeUserSessions,smsTransport,telegramTransport,getTelegramBotUsername:()=>telegramBotUsername});
 app.post('/api/auth/register', requireDb, rateAuth, route(async (req, res) => {
   const name = text(req.body.name), email = text(req.body.email, 200).toLowerCase(), password = String(req.body.password || '');
   if (name.length < 2 || email.endsWith('@marketuz.invalid') || !emailOk(email) || !passwordStrength(password).ok) throw fail(400, 'Ism, email va kamida 10 belgili ishonchli parol kiriting.');
@@ -414,10 +415,47 @@ app.post('/api/telegram/webhook', route(async(req,res)=>{
   if(!token||!secretToken) throw fail(503,'Telegram bot sozlanmagan.');
   const got=req.get('X-Telegram-Bot-Api-Secret-Token')||'';
   if(!got||Buffer.byteLength(got)!==Buffer.byteLength(secretToken)||!timingSafeEqual(Buffer.from(got),Buffer.from(secretToken))) throw fail(401,'Telegram imzosi xato.');
+  const sendBot=async(payload)=>{
+    if(process.env.NODE_ENV!=='production'&&typeof telegramTransport==='function') return telegramTransport(payload);
+    const reply=await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(10000)});
+    if(!reply.ok) throw fail(502,'Telegram xabarini yuborib bo‘lmadi.');
+  };
   const message=req.body?.message;
   if(message?.text?.startsWith('/start') && Number.isSafeInteger(message.chat?.id)){
-    const reply=await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:message.chat.id,text:`${site.brand.name} — mahsulotlarni kashf eting.`,reply_markup:{inline_keyboard:[[{text:'Do‘konni ochish',web_app:{url:site.seo.siteUrl}}]]}}),signal:AbortSignal.timeout(10000)});
-    if(!reply.ok) throw fail(502,'Telegram xabarini yuborib bo‘lmadi.');
+    const arg=message.text.split(/\s+/)[1]||'';
+    if(arg.startsWith('otp_') || message.chat?.type==='private'){
+      await sendBot({
+        chat_id:message.chat.id,
+        text:`${site.brand.name} hisobini tasdiqlash uchun pastdagi tugma orqali telefon raqamingizni yuboring. So‘ng saytga qaytib "Kod olish" tugmasini bosing.`,
+        reply_markup:{keyboard:[[{text:'📱 Telefon raqamimni ulashish',request_contact:true}]],resize_keyboard:true,one_time_keyboard:true}
+      });
+    } else {
+      await sendBot({chat_id:message.chat.id,text:`${site.brand.name} — mahsulotlarni kashf eting.`,reply_markup:{inline_keyboard:[[{text:'Do‘konni ochish',web_app:{url:site.seo.siteUrl}}]]}});
+    }
+  } else if(message?.contact && Number.isSafeInteger(message.chat?.id) && message.chat?.type==='private' && pool){
+    const fromId=Number(message.from?.id), contactUid=Number(message.contact?.user_id);
+    if(!Number.isSafeInteger(fromId) || fromId!==contactUid){
+      await sendBot({chat_id:message.chat.id,text:'Xavfsizlik sababli faqat o‘zingizning Telegram raqamingizni ulashishingiz mumkin.'});
+      return res.json({ok:true});
+    }
+    const phone=normalizePhone(message.contact.phone_number);
+    if(!phone){
+      await sendBot({chat_id:message.chat.id,text:'Hozircha faqat +998 O‘zbekiston telefon raqamlari qabul qilinadi.'});
+      return res.json({ok:true});
+    }
+    const db=await pool.connect();
+    try{
+      await db.query('BEGIN');
+      await db.query('DELETE FROM telegram_phone_links WHERE chat_id=$1 OR phone=$2',[message.chat.id,phone]);
+      await db.query('INSERT INTO telegram_phone_links(phone,chat_id,telegram_user_id,username) VALUES($1,$2,$3,$4)',[phone,message.chat.id,fromId,String(message.from?.username||'').slice(0,100)]);
+      await db.query('COMMIT');
+    }catch(e){await db.query('ROLLBACK').catch(()=>{});throw e;}
+    finally{db.release();}
+    await sendBot({
+      chat_id:message.chat.id,
+      text:`✅ ${formatPhone(phone)} raqamingiz muvaffaqiyatli ulandi!\n\nEndi Marketuz saytiga qaytib "Telegram orqali kod olish" tugmasini bosing — 6 xonali tasdiqlash kodi shu yerga keladi.`,
+      reply_markup:{remove_keyboard:true}
+    });
   }
   res.json({ok:true});
 }));
@@ -847,7 +885,7 @@ app.use((err,req,res,next) => {
     console.error('Request error:', err.message);
     if (pool) logSecurityEvent(pool, { userId: req.user?.id || null, eventType: 'server_error', severity: 'error', req, details: { method: req.method, path: String(req.path || '').slice(0, 120), message: String(err.message || '').slice(0, 180) } }).catch(() => {});
   }
-  res.status(err.status || 500).json({ error: err.status ? err.message : 'Serverda xatolik yuz berdi. Keyinroq urinib ko‘ring.' });
+  res.status(err.status || 500).json({ error: err.status ? err.message : 'Serverda xatolik yuz berdi. Keyinroq urinib ko‘ring.', ...(err.status && err.extra ? err.extra : {}) });
 });
 
 async function initialize() {
@@ -862,6 +900,24 @@ async function initialize() {
     const publicUrl=new URL(process.env.MARKETUZ_URL);
     if(publicUrl.protocol!=='https:'||publicUrl.username||publicUrl.password||publicUrl.pathname!=='/'||publicUrl.search||publicUrl.hash)throw new Error('MARKETUZ_URL must be an HTTPS origin.');
     site.seo.siteUrl=publicUrl.origin;
+  }
+  if(process.env.TELEGRAM_BOT_TOKEN && !(process.env.NODE_ENV!=='production'&&typeof telegramTransport==='function')){
+    try{
+      if(!telegramBotUsername){
+        const meRes=await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getMe`,{signal:AbortSignal.timeout(6000)});
+        const meData=await meRes.json().catch(()=>null);
+        if(meData?.ok && meData.result?.username) telegramBotUsername=String(meData.result.username);
+      }
+      const webhookBase=process.env.MARKETUZ_URL||process.env.RENDER_EXTERNAL_URL||site.seo.siteUrl;
+      if(process.env.NODE_ENV==='production' && process.env.TELEGRAM_WEBHOOK_SECRET && webhookBase?.startsWith('https://')){
+        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/setWebhook`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({url:new URL('/api/telegram/webhook',webhookBase).href,secret_token:process.env.TELEGRAM_WEBHOOK_SECRET,allowed_updates:['message']}),
+          signal:AbortSignal.timeout(6000)
+        });
+      }
+    }catch(e){console.warn('Telegram startup sync skipped:',e.message);}
   }
   const count = await pool.query('SELECT count(*)::int AS n FROM products');
   if (!count.rows[0].n) {
