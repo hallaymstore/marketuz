@@ -1,5 +1,6 @@
 import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { hasCardNumber } from './order-safety.js';
+import { createRateLimiter } from './security.js';
 
 const error=(code,message,data)=>({code,message:{uz:message,ru:message,en:message},...(data?{data}:{})});
 const rpcFail=(code,message,data)=>{throw error(code,message,data);};
@@ -210,9 +211,10 @@ export function mountPayments(app,pool,ready,opts={}){
 
   if (opts.auth && opts.route && opts.fail && opts.requireDb) {
     const { auth, route, fail, requireDb } = opts;
+    const rateCardPay = createRateLimiter({ windowMs: 15 * 60_000, max: 25, message: 'To‘lov urinishlari juda ko‘p. Biroz kuting.' });
 
     // Step 1: Validate card + expiry on dedicated /pay/:id page & request Click SMS OTP (PAN is NEVER saved to DB)
-    app.post('/api/payments/click/card-request', requireDb, auth, route(async (req, res) => {
+    app.post('/api/payments/click/card-request', requireDb, auth, rateCardPay, route(async (req, res) => {
       const orderId = String(req.body?.orderId || '');
       const saveCard = req.body?.saveCard === true;
       if (!idOk(orderId)) throw fail(404, 'Buyurtma topilmadi.');
@@ -240,13 +242,13 @@ export function mountPayments(app,pool,ready,opts={}){
         if (!resp.ok || Number(data?.error_code) !== 0 || !data?.card_token) {
           throw fail(400, String(data?.error_note || 'Click karta tekshiruvidan o‘tmadi. Ma’lumotlarni tekshiring.'));
         }
-        pendingCardTokens.set(key, { cardToken: String(data.card_token), mode: 'click', maskedCard, cardType, saveCard, expiresAt: Date.now() + 10 * 60_000 });
+        pendingCardTokens.set(key, { cardToken: String(data.card_token), mode: 'click', maskedCard, cardType, saveCard, attempts: 0, expiresAt: Date.now() + 10 * 60_000 });
         return res.json({ ok: true, step: 'verify', maskedCard, phoneNumber: String(data.phone_number || ''), message: 'Kartaga bog‘langan raqamga SMS kod yuborildi.' });
       }
 
       if (isClickSandboxAllowed()) {
         const sandboxOtp = String(randomInt(100_000, 1_000_000));
-        pendingCardTokens.set(key, { cardToken: 'sbx-' + randomUUID(), mode: 'sandbox', sandboxOtp, maskedCard, cardType, saveCard, expiresAt: Date.now() + 10 * 60_000 });
+        pendingCardTokens.set(key, { cardToken: 'sbx-' + randomUUID(), mode: 'sandbox', sandboxOtp, maskedCard, cardType, saveCard, attempts: 0, expiresAt: Date.now() + 10 * 60_000 });
         return res.json({ ok: true, step: 'verify', maskedCard, sandboxSmsCode: sandboxOtp, message: 'Sinov bank SMS kodi yuborildi.' });
       }
 
@@ -254,7 +256,7 @@ export function mountPayments(app,pool,ready,opts={}){
     }));
 
     // Step 2: Verify SMS OTP & charge exact backend order total
-    app.post('/api/payments/click/card-verify', requireDb, auth, route(async (req, res) => {
+    app.post('/api/payments/click/card-verify', requireDb, auth, rateCardPay, route(async (req, res) => {
       const orderId = String(req.body?.orderId || '');
       const smsCode = String(req.body?.smsCode || '').replace(/\D/g, '');
       if (!idOk(orderId)) throw fail(404, 'Buyurtma topilmadi.');
@@ -265,6 +267,10 @@ export function mountPayments(app,pool,ready,opts={}){
       if (!pending || pending.expiresAt < Date.now()) {
         pendingCardTokens.delete(key);
         throw fail(400, 'To‘lov sessiyasi muddati tugagan. Kartani qayta kiriting.');
+      }
+      if ((pending.attempts || 0) >= 5) {
+        pendingCardTokens.delete(key);
+        throw fail(429, 'Noto‘g‘ri SMS kodlar soni oshib ketdi. Kartani qaytadan kiriting.');
       }
 
       const dbCheck = (await pool.query('SELECT id, buyer_id, total, status, payment_method FROM orders WHERE id=$1', [orderId])).rows[0];
@@ -282,7 +288,9 @@ export function mountPayments(app,pool,ready,opts={}){
         });
         const verifyData = await verifyRes.json().catch(() => null);
         if (!verifyRes.ok || Number(verifyData?.error_code) !== 0) {
-          throw fail(400, String(verifyData?.error_note || 'SMS tasdiqlash kodi noto‘g‘ri.'));
+          pending.attempts = (pending.attempts || 0) + 1;
+          if (pending.attempts >= 5) pendingCardTokens.delete(key);
+          throw fail(pending.attempts >= 5 ? 429 : 400, String(verifyData?.error_note || 'SMS tasdiqlash kodi noto‘g‘ri.'));
         }
         if (verifyData.card_token) verifiedToken = String(verifyData.card_token);
         const payRes = await fetch('https://api.click.uz/v2/merchant/card_token/payment', {
@@ -297,7 +305,14 @@ export function mountPayments(app,pool,ready,opts={}){
         }
         gatewayTxId = String(payData.payment_id || verifiedToken || ('click-' + Date.now()));
       } else {
-        if (smsCode !== pending.sandboxOtp) throw fail(400, 'Sinov SMS kodi noto‘g‘ri.');
+        if (smsCode !== pending.sandboxOtp) {
+          pending.attempts = (pending.attempts || 0) + 1;
+          if (pending.attempts >= 5) {
+            pendingCardTokens.delete(key);
+            throw fail(429, 'Noto‘g‘ri SMS kodlar soni oshib ketdi. Kartani qaytadan kiriting.');
+          }
+          throw fail(400, 'Sinov SMS kodi noto‘g‘ri.');
+        }
         gatewayTxId = 'sandbox-card-' + Date.now();
       }
 
@@ -345,7 +360,7 @@ export function mountPayments(app,pool,ready,opts={}){
       res.json({ ok: true });
     }));
 
-    app.post('/api/payments/click/pay-saved', requireDb, auth, route(async (req, res) => {
+    app.post('/api/payments/click/pay-saved', requireDb, auth, rateCardPay, route(async (req, res) => {
       const orderId = String(req.body?.orderId || '');
       const cardId = String(req.body?.cardId || '');
       if (!idOk(orderId) || !/^\d+$/.test(cardId)) throw fail(400, 'Buyurtma yoki karta ID noto‘g‘ri.');

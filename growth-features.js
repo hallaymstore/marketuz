@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-import { logAudit } from './security.js';
+import { createRateLimiter, logAudit } from './security.js';
 import { normalizePhone } from './phone-auth.js';
 
 const UUID_RE = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -185,6 +185,8 @@ export function effectivePrice(p) {
 }
 
 export function mountGrowthFeatures(app, { pool, requireDb, auth, role, route, fail, text, idParam, createNotification, telegramTransport, getLegal }) {
+  const rateSpam = createRateLimiter({ windowMs: 15 * 60_000, max: 30, message: 'Juda ko‘p xabar yoki so‘rov yuborildi. Biroz kuting.' });
+  const ratePayout = createRateLimiter({ windowMs: 15 * 60_000, max: 10, message: 'Pul yechish so‘rovlari limiti vaqtincha tugadi.' });
   // 1. Product Q&A (Savol-javob)
   app.get('/api/products/:id/questions', route(async (req, res) => {
     const pid = idParam(req.params.id);
@@ -197,7 +199,7 @@ export function mountGrowthFeatures(app, { pool, requireDb, auth, role, route, f
     res.json({ questions: rows });
   }));
 
-  app.post('/api/products/:id/questions', requireDb, auth, route(async (req, res) => {
+  app.post('/api/products/:id/questions', requireDb, auth, rateSpam, route(async (req, res) => {
     const pid = idParam(req.params.id);
     const question = text(req.body?.question, 400);
     if (question.length < 5) throw fail(400, 'Savol kamida 5 ta belgidan iborat bo‘lsin.');
@@ -365,7 +367,7 @@ export function mountGrowthFeatures(app, { pool, requireDb, auth, role, route, f
     res.json({ messages: rows });
   }));
 
-  app.post('/api/orders/:id/messages', requireDb, auth, route(async (req, res) => {
+  app.post('/api/orders/:id/messages', requireDb, auth, rateSpam, route(async (req, res) => {
     const { order, items, isBuyer, isAdmin } = await loadAuthorizedOrder(req.params.id, req.user);
     const message = text(req.body?.message, 800);
     if (message.length < 1) throw fail(400, 'Xabar matnini yozing.');
@@ -446,7 +448,7 @@ export function mountGrowthFeatures(app, { pool, requireDb, auth, role, route, f
     res.json({ sellerBalance: Number(userRow?.seller_balance || 0), payouts });
   }));
 
-  app.post('/api/seller/payouts', requireDb, auth, role('seller'), route(async (req, res) => {
+  app.post('/api/seller/payouts', requireDb, auth, role('seller'), ratePayout, route(async (req, res) => {
     const amount = Number.parseInt(req.body?.amount, 10);
     const cardMask = text(req.body?.cardMask, 32);
     const recipientName = text(req.body?.recipientName || req.user.full_name, 120);

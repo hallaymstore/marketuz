@@ -1,4 +1,4 @@
-import { logAudit } from './security.js';
+import { createRateLimiter, logAudit } from './security.js';
 import { calculateShipping, createShippingProvider, findNearestBranches, regionDistricts, uzpostBranches } from './shipping.js';
 
 export function computePromoDiscount(promo, subtotal) {
@@ -165,7 +165,8 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
   }));
 
   // Promo code preview
-  app.post('/api/promo/check', requireDb, auth, route(async (req, res) => {
+  const ratePromo = createRateLimiter({ windowMs: 15 * 60_000, max: 25, message: 'Promokod tekshirish limiti tugadi. Birozdan keyin urinib ko‘ring.' });
+  app.post('/api/promo/check', requireDb, auth, ratePromo, route(async (req, res) => {
     const code = text(req.body?.code, 32).toUpperCase();
     const subtotal = Math.max(0, Number(req.body?.subtotal || 0));
     if (!/^[A-Z0-9_-]{3,32}$/.test(code)) throw fail(400, 'Promokod formati noto‘g‘ri.');
@@ -245,6 +246,16 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
        ORDER BY r.created_at DESC LIMIT 30`,
       [req.user.id]
     )).rows;
+    const dailySales = (await pool.query(
+      `SELECT to_char(d.day, 'MM-DD') AS label,
+              coalesce(sum(i.price * i.quantity), 0)::bigint AS revenue,
+              count(DISTINCT o.id)::int AS orders
+       FROM generate_series(current_date - interval '6 days', current_date, interval '1 day') AS d(day)
+       LEFT JOIN orders o ON o.created_at::date = d.day::date AND o.status != 'cancelled'
+       LEFT JOIN order_items i ON i.order_id = o.id AND i.seller_id = $1
+       GROUP BY d.day ORDER BY d.day ASC`,
+      [req.user.id]
+    )).rows;
     res.json({
       stats: {
         ...sales,
@@ -253,7 +264,8 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
         commission_amount: commission,
         net_revenue: gross - commission
       },
-      returns
+      returns,
+      dailySales
     });
   }));
 
@@ -376,6 +388,14 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
         uptimeSeconds: Math.round(process.uptime()),
         memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
         nodeVersion: process.version
+      },
+      securityPosture: {
+        cspStrict: true,
+        sandboxedMedia: true,
+        zeroPanStorage: true,
+        csrfOriginCheck: true,
+        otpBruteForceLockout: true,
+        rateLimitersActive: ['auth', 'orders', 'assets', 'promo', 'cardPay', 'messages', 'payouts']
       }
     });
   }));

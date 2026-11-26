@@ -2,6 +2,7 @@ import express from 'express';
 import { formatPhone, isMockSmsAllowed, mountPhoneAuth, normalizePhone, otpMode, smsReady } from './phone-auth.js';
 import {
   checkAuthLockout,
+  createRateLimiter,
   deviceLabelFromUa,
   generateTotpSecret,
   logAudit,
@@ -62,6 +63,10 @@ app.use((req, res, next) => {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'strict-origin',
     'X-Frame-Options': 'DENY',
+    'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    'X-DNS-Prefetch-Control': 'off',
+    'X-Permitted-Cross-Domain-Policies': 'none',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=(self)',
     'Content-Security-Policy': "default-src 'self'; object-src 'none'; img-src 'self' data: https:; script-src 'self' https://telegram.org https://my.click.uz; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://my.click.uz; frame-src https://my.click.uz; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://my.click.uz"
   });
@@ -174,13 +179,18 @@ const authHits = new Map();
 const rateAuth = (req, res, next) => { const key = req.ip || 'unknown', now = Date.now(); const hit = authHits.get(key) || { n: 0, until: now + 15 * 60_000 }; if (hit.until < now) { hit.n = 0; hit.until = now + 15 * 60_000; } if (++hit.n > 25) return res.status(429).json({ error: 'Juda ko‘p urinish. Birozdan keyin qayta urinib ko‘ring.' }); authHits.set(key, hit); next(); };
 setInterval(() => { for (const [key, value] of authHits) if (value.until < Date.now()) authHits.delete(key); }, 20 * 60_000).unref();
 
+const rateOrders = createRateLimiter({ windowMs: 15 * 60_000, max: 20, message: 'Juda ko‘p buyurtma urinishi. Birozdan keyin qayta urinib ko‘ring.' });
+const rateAssets = createRateLimiter({ windowMs: 15 * 60_000, max: 25, message: 'Rasm yuklash limiti vaqtincha tugadi.' });
+
 app.get('/api/healthz', route(async (req, res) => { if (pool) await pool.query('SELECT 1'); res.json({ ok: true, database: pool ? 'ready' : 'preview' }); }));
 app.get('/api/config', (req, res) => res.json({ categories:site.categories, regions, demoOnly, payments: ['click',...['payme'].filter(paymentReady),...(allowCod()?['cod']:[])], clickCardReady:clickCardApiReady(), shipping: process.env.SHIPPING_INCLUDED_IN_PRICE==='true'?'included':'manual', site, seasonal:seasonalState(site), telegramEnabled:!!process.env.TELEGRAM_BOT_TOKEN, telegramBotUsername, otpMode:otpMode(), smsEnabled:!demoOnly&&(smsReady()||typeof smsTransport==='function'), mockSms:!demoOnly&&isMockSmsAllowed(), clickSandbox:!demoOnly&&isClickSandboxAllowed() }));
 app.get('/media/:id', requireDb, route(async (req,res)=>{
   if(!/^[0-9a-f-]{36}$/.test(req.params.id)) throw fail(404,'Rasm topilmadi.');
   const {rows}=await pool.query('SELECT mime,bytes FROM site_assets WHERE id=$1',[req.params.id]);
   if(!rows[0]) throw fail(404,'Rasm topilmadi.');
-  res.set('Content-Type',rows[0].mime); res.set('Cache-Control','public,max-age=31536000,immutable'); res.send(rows[0].bytes);
+  const safeMime = ['image/png','image/jpeg','image/webp'].includes(rows[0].mime) ? rows[0].mime : 'application/octet-stream';
+  res.set({ 'Content-Type': safeMime, 'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Resource-Policy': 'same-origin', 'Cache-Control': 'public,max-age=31536000,immutable' });
+  res.send(rows[0].bytes);
 }));
 app.get('/manifest.webmanifest',(req,res)=>res.type('application/manifest+json').set('Cache-Control','no-store').json({name:site.brand.name,short_name:site.brand.name.slice(0,12),description:site.brand.description,start_url:'/',display:'standalone',background_color:'#fbf8ef',theme_color:'#113d36',icons:[{src:site.brand.favicon||'/favicon.svg',sizes:'any',purpose:'any'}]}));
 app.get('/api/admin/settings', requireDb, auth, role('admin'), (req,res)=>res.json({ site, seasonal:seasonalState(site), payments:{click:paymentReady('click'),clickInline:paymentReady('click')&&process.env.CLICK_INLINE_ENABLED==='true'&&!!process.env.CLICK_MERCHANT_USER_ID,payme:paymentReady('payme'),enabled:process.env.PAYMENTS_ENABLED==='true',shippingIncluded:process.env.SHIPPING_INCLUDED_IN_PRICE==='true'},telegram:!!process.env.TELEGRAM_BOT_TOKEN }));
@@ -194,7 +204,7 @@ app.patch('/api/admin/settings', requireDb, auth, role('admin'), route(async(req
   try { await db.query('BEGIN'); await db.query("INSERT INTO site_settings(key,value,updated_by) VALUES('site',$1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now(),updated_by=excluded.updated_by",[next,req.user.id]); await db.query('INSERT INTO settings_audit(actor_id,old_value,new_value) VALUES($1,$2,$3)',[req.user.id,site,next]); await db.query('COMMIT'); site=next; res.json({site,seasonal:seasonalState(site)}); }
   catch(e){await db.query('ROLLBACK');throw e;} finally{db.release();}
 }));
-app.post('/api/assets', requireDb, auth, route(async(req,res)=>{
+app.post('/api/assets', requireDb, auth, rateAssets, route(async(req,res)=>{
   const data=String(req.body.data||'');
   if(!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(data)) throw fail(400,'PNG, JPEG yoki WebP rasm yuklang.');
   const [,kind,b64]=data.match(/^data:image\/(png|jpeg|webp);base64,(.*)$/);
@@ -600,7 +610,7 @@ app.get('/api/favorites', requireDb, auth, route(async (req, res) => {
 app.put('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const pid = idParam(req.params.id); const { rowCount } = await pool.query("INSERT INTO favorites(user_id,product_id) SELECT $1,id FROM products WHERE id=$2 AND status='active' ON CONFLICT DO NOTHING", [req.user.id,pid]); res.json({ ok: true, added: !!rowCount }); }));
 app.delete('/api/favorites/:id', requireDb, auth, route(async (req, res) => { const pid = idParam(req.params.id); await pool.query('DELETE FROM favorites WHERE user_id=$1 AND product_id=$2', [req.user.id,pid]); res.json({ ok: true }); }));
 
-app.post('/api/orders', requireDb, auth, route(async (req, res) => {
+app.post('/api/orders', requireDb, auth, rateOrders, route(async (req, res) => {
   const body = req.body||{}, recipient = text(body.recipient), phone = text(body.phone,30), note = text(body.note,500);
   if (checkoutContainsCardData(body)) throw fail(400,'Karta ma’lumotlarini saytga yubormang. Karta Click oynasiga kiritiladi.');
   const deliveryMode = body.deliveryMode === 'uzpost_pickup' ? 'uzpost_pickup' : 'courier';

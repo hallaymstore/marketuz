@@ -1,33 +1,53 @@
-/* Marketuz Growth UI · Map, I18n UZ/RU, Timers, Modals (Receipts, Shipping Labels, Order Chat) */
+/* Marketuz Growth UI · Pure SVG Map, Full UZ/RU I18n, Lightbox, Charts, Timers, Modals */
 window.MarketuzGrowth = (() => {
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const money = n => `${new Intl.NumberFormat('uz-UZ').format(Number(n) || 0)} so‘m`;
+  const money = (n, lang = getLang()) => `${new Intl.NumberFormat('uz-UZ').format(Number(n) || 0)} ${lang === 'ru' ? 'сум' : 'so‘m'}`;
 
   const dict = {
     uz: {
       catalog: 'Katalog', discover: '✦ Kashfiyot', delivery: 'Yetkazib berish', sellerBtn: 'Sotuvchi bo‘lish',
       searchPlaceholder: 'Nima qidiryapsiz?', searchBtn: 'Qidirish', cart: 'Savat',
-      home: 'Bosh sahifa', profile: 'Profil', addToCart: 'Savatga', variants: 'Variantlar',
+      home: 'Bosh sahifa', profile: 'Profil', favorites: 'Sevimlilar', help: 'Yordam markazi',
+      addToCart: 'Savatga', addToCartFull: 'Savatga qo‘shish', variants: 'Variantlar',
       quickBuy: '1 bosishda xarid', selectAll: 'Hammasini tanlash', selectedTotal: 'Tanlanganlar jami',
-      checkoutSelected: 'Tanlanganlarni rasmiylashtirish', moveToCart: 'Savatga ko‘chirish',
-      wallet: 'Bonus hamyon', alerts: 'Kuzatuvlar', qaTitle: 'Savol-javob', askQuestion: 'Savol yozish',
-      useBonus: 'Bonus balansdan yechish', saveCard: 'Kartani keyingi xaridlar uchun eslab qolish (Click)',
-      receiptBtn: 'Chek / Kvitansiya', chatBtn: 'Sotuvchi bilan chat', nakladnoyBtn: 'Nakladnoy chop etish',
+      checkoutProceed: 'Buyurtmaga o‘tish', checkoutSubmit: 'Buyurtmani yuborish',
+      moveToCart: 'Barchasini savatga ko‘chirish', wallet: 'Bonus hamyon', alerts: 'Kuzatuvlar',
+      qaTitle: 'Savol-javob', askQuestion: 'Savol yuborish', reviewsTitle: 'Xaridor sharhlari',
+      useBonus: 'Bonus balansingizdan yechish', saveCard: 'Kartani keyingi xaridlar uchun eslab qolish (Click token)',
+      receiptBtn: 'Chek / Kvitansiya', chatBtn: 'Sotuvchi bilan chat', nakladnoyBtn: 'Nakladnoy',
       excelExport: 'Excel (.xlsx) yuklash', lowStockOnly: 'Kam qoldi (≤ 3)', promoteTop: 'TOP ga chiqarish',
-      promoted: 'TOPda', payouts: 'Balans va yechish', questionsTab: 'Savollar'
+      promoted: 'TOPdan tushirish', payouts: 'Balans va yechish', questionsTab: 'Savollar',
+      flashEyebrow: 'TEZKOR AKSIYA', flashTitle: 'Flash Sale · Vaqtli chegirmalar',
+      flashFilter: '⚡ Faqat aksiyalar', exploreBtn: 'Mahsulotlarni kashf eting',
+      summaryTitle: 'Buyurtma xulosasi', subtotalLabel: 'Mahsulotlar', promoLabel: 'Promokod chegirmasi',
+      bonusLabel: 'Bonusdan yechildi', deliveryLabel: 'Yetkazib berish', totalPayLabel: 'To‘lov summasi',
+      uploadReviewPhoto: '+ Rasm yuklash (4 tagacha)'
     },
     ru: {
       catalog: 'Каталог', discover: '✦ Открытия', delivery: 'Доставка', sellerBtn: 'Стать продавцом',
       searchPlaceholder: 'Что вы ищете?', searchBtn: 'Поиск', cart: 'Корзина',
-      home: 'Главная', profile: 'Профиль', addToCart: 'В корзину', variants: 'Варианты',
+      home: 'Главная', profile: 'Профиль', favorites: 'Избранное', help: 'Помощь',
+      addToCart: 'В корзину', addToCartFull: 'Добавить в корзину', variants: 'Варианты',
       quickBuy: 'Купить в 1 клик', selectAll: 'Выбрать все', selectedTotal: 'Итого выбранное',
-      checkoutSelected: 'Оформить выбранные', moveToCart: 'В корзину',
-      wallet: 'Бонусный кошелёк', alerts: 'Подписки', qaTitle: 'Вопросы и ответы', askQuestion: 'Задать вопрос',
-      useBonus: 'Списать с бонусного баланса', saveCard: 'Сохранить карту для следующих покупок (Click)',
-      receiptBtn: 'Чек / Квитанция', chatBtn: 'Чат с продавцом', nakladnoyBtn: 'Печать накладной',
+      checkoutProceed: 'Перейти к оформлению', checkoutSubmit: 'Оформить заказ',
+      moveToCart: 'Перенести всё в корзину', wallet: 'Бонусный кошелёк', alerts: 'Подписки',
+      qaTitle: 'Вопросы и ответы', askQuestion: 'Отправить вопрос', reviewsTitle: 'Отзывы покупателей',
+      useBonus: 'Списать с бонусного баланса', saveCard: 'Сохранить карту для следующих покупок (Click токен)',
+      receiptBtn: 'Чек / Квитанция', chatBtn: 'Чат с продавцом', nakladnoyBtn: 'Накладная',
       excelExport: 'Скачать Excel (.xlsx)', lowStockOnly: 'Мало осталось (≤ 3)', promoteTop: 'В ТОП',
-      promoted: 'В ТОПе', payouts: 'Баланс и вывод', questionsTab: 'Вопросы'
+      promoted: 'Убрать из ТОПа', payouts: 'Баланс и вывод', questionsTab: 'Вопросы',
+      flashEyebrow: 'СРОЧНЫЕ СКИДКИ', flashTitle: 'Flash Sale · Горящие предложения',
+      flashFilter: '⚡ Только со скидкой', exploreBtn: 'Открыть каталог',
+      summaryTitle: 'Итог заказа', subtotalLabel: 'Товары', promoLabel: 'Скидка по промокоду',
+      bonusLabel: 'Списано бонусов', deliveryLabel: 'Доставка', totalPayLabel: 'К оплате',
+      uploadReviewPhoto: '+ Загрузить фото (до 4)'
     }
+  };
+
+  const ruStatuses = {
+    awaiting_payment: 'Ожидает оплаты', new: 'Новый заказ', accepted: 'Принят', packing: 'Упаковывается',
+    handed_over: 'Передан в UzPost', in_transit: 'В пути', delivered: 'Доставлен', cancelled: 'Отменён',
+    pending: 'На проверке', active: 'Активен', rejected: 'Отклонён', archived: 'В архиве', approved: 'Одобрен', ready: 'Готов'
   };
 
   function getLang() {
@@ -43,12 +63,18 @@ window.MarketuzGrowth = (() => {
     const lang = getLang();
     return dict[lang]?.[key] || dict.uz[key] || key;
   }
+  function statusLabel(code, uzFallback) {
+    return getLang() === 'ru' ? (ruStatuses[code] || uzFallback || code) : (uzFallback || code);
+  }
   function applyLang(lang = getLang()) {
     document.documentElement.lang = lang;
     const btn = document.getElementById('lang-toggle');
     if (btn) btn.textContent = lang === 'ru' ? 'RU' : 'UZ';
     const d = dict[lang] || dict.uz;
-    const navMap = { '/catalog': d.catalog, '/discover': d.discover, '/delivery': d.delivery, '/seller': d.sellerBtn };
+    const navMap = {
+      '/': d.home, '/catalog': d.catalog, '/discover': d.discover, '/delivery': d.delivery,
+      '/seller': d.sellerBtn, '/favorites': d.favorites, '/help': d.help, '/cart': d.cart, '/account': d.profile
+    };
     document.querySelectorAll('.desktop-links a, #mobile-drawer nav a').forEach(a => {
       const href = a.getAttribute('href');
       if (navMap[href]) {
@@ -56,6 +82,11 @@ window.MarketuzGrowth = (() => {
         if (slot) a.replaceChildren(slot, document.createTextNode(navMap[href]));
         else a.textContent = navMap[href];
       }
+    });
+    document.querySelectorAll('.bottom-nav a').forEach(a => {
+      const href = a.dataset.nav || a.getAttribute('href');
+      const labelEl = a.querySelector('span:last-child');
+      if (labelEl && navMap[href]) labelEl.textContent = navMap[href];
     });
     const searchInput = document.getElementById('search-input');
     if (searchInput) searchInput.placeholder = d.searchPlaceholder;
@@ -76,7 +107,7 @@ window.MarketuzGrowth = (() => {
   }
   function formatCountdown(until) {
     const diff = Math.max(0, Math.floor((new Date(until).getTime() - Date.now()) / 1000));
-    if (!diff) return 'Tugadi';
+    if (!diff) return getLang() === 'ru' ? 'Завершено' : 'Tugadi';
     const h = String(Math.floor(diff / 3600)).padStart(2, '0');
     const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
     const s = String(diff % 60).padStart(2, '0');
@@ -103,25 +134,28 @@ window.MarketuzGrowth = (() => {
   function installmentHint(price) {
     const monthly = Math.ceil((Number(price || 0) * 1.24) / 12 / 1000) * 1000;
     if (!monthly || Number(price) < 50_000) return '';
-    return `<small class="nasiya-chip">Nasiya: ${money(monthly)} / oy · 12 oy</small>`;
+    return getLang() === 'ru'
+      ? `<small class="nasiya-chip">Рассрочка: ${money(monthly, 'ru')} / мес · 12 мес</small>`
+      : `<small class="nasiya-chip">Nasiya: ${money(monthly, 'uz')} / oy · 12 oy</small>`;
   }
   function socialProofHtml(p) {
+    const ru = getLang() === 'ru';
     const chips = [];
     if (p.is_promoted && (!p.promoted_until || new Date(p.promoted_until).getTime() > Date.now())) {
       chips.push('<span class="proof-chip promoted">★ TOP</span>');
     }
     if (p.stock_mode !== 'replenishable' && Number(p.stock) > 0 && Number(p.stock) <= 5) {
-      chips.push(`<span class="proof-chip low">🔥 Oxirgi ${p.stock} dona</span>`);
+      chips.push(`<span class="proof-chip low">${ru ? `🔥 Осталось ${p.stock} шт` : `🔥 Oxirgi ${p.stock} dona`}</span>`);
     } else if (Number(p.sold_count) >= 5) {
-      chips.push(`<span class="proof-chip sold">✓ ${p.sold_count} ta sotilgan</span>`);
+      chips.push(`<span class="proof-chip sold">${ru ? `✓ Купили ${p.sold_count}` : `✓ ${p.sold_count} ta sotilgan`}</span>`);
     }
     if (Number(p.bundle_discount_percent) > 0) {
-      chips.push(`<span class="proof-chip bundle">📦 2+ dona = −${p.bundle_discount_percent}%</span>`);
+      chips.push(`<span class="proof-chip bundle">${ru ? `📦 От 2 шт = −${p.bundle_discount_percent}%` : `📦 2+ dona = −${p.bundle_discount_percent}%`}</span>`);
     }
     return chips.length ? `<div class="proof-row">${chips.join('')}</div>` : '';
   }
 
-  // Self-hosted Interactive Uzbekistan SVG Coordinate Map for UzPost Branches (100% CSP safe, zero inline styles)
+  // Self-hosted Interactive Uzbekistan SVG Coordinate Map (100% CSP safe)
   function projectUz(lat, lng) {
     const x = Math.round(Math.max(60, Math.min(940, ((Number(lng) - 58.2) / (73.4 - 58.2)) * 880 + 60)));
     const y = Math.round(Math.max(55, Math.min(545, (1 - (Number(lat) - 37.0) / (43.1 - 37.0)) * 490 + 55)));
@@ -149,7 +183,28 @@ window.MarketuzGrowth = (() => {
     </div>`;
   }
 
-  function showModal(html) {
+  // 7-day Seller Daily Sales Pure SVG Chart
+  function sellerSalesChartHtml(dailySales = []) {
+    if (!Array.isArray(dailySales) || !dailySales.length) return '';
+    const maxRev = Math.max(1, ...dailySales.map(d => Number(d.revenue || 0)));
+    const bars = dailySales.map((d, i) => {
+      const rev = Number(d.revenue || 0);
+      const h = rev > 0 ? Math.max(8, Math.round((rev / maxRev) * 100)) : 4;
+      const x = 35 + i * 94;
+      const y = 126 - h;
+      return `<g class="chart-bar-group">
+        <title>${esc(d.label)}: ${money(rev)} (${d.orders || 0} buyurtma)</title>
+        <rect class="chart-bar ${rev > 0 ? 'has-rev' : ''}" x="${x}" y="${y}" width="52" height="${h}" rx="6"/>
+        <text class="chart-day-label" x="${x + 26}" y="148" text-anchor="middle">${esc(d.label)}</text>
+      </g>`;
+    }).join('');
+    return `<div class="dashboard-card seller-chart-card">
+      <div class="dashboard-heading"><h2>${getLang() === 'ru' ? 'Динамика продаж (7 дней)' : 'So‘nggi 7 kunlik savdo dinamikasi'}</h2><small>${money(dailySales.reduce((s, d) => s + Number(d.revenue || 0), 0))}</small></div>
+      <svg class="seller-chart-svg" viewBox="0 0 700 164" role="img" aria-label="7 kunlik savdo grafigi">${bars}</svg>
+    </div>`;
+  }
+
+  function showModal(html, modalClass = '') {
     let backdrop = document.getElementById('growth-modal-backdrop');
     if (!backdrop) {
       backdrop = document.createElement('div');
@@ -157,12 +212,37 @@ window.MarketuzGrowth = (() => {
       backdrop.className = 'growth-modal-backdrop';
       document.body.appendChild(backdrop);
     }
-    backdrop.innerHTML = `<div class="growth-modal" role="dialog" aria-modal="true"><button type="button" class="growth-modal-close" data-action="growth-close-modal" aria-label="Yopish">×</button>${html}</div>`;
+    backdrop.innerHTML = `<div class="growth-modal ${esc(modalClass)}" role="dialog" aria-modal="true"><button type="button" class="growth-modal-close" data-action="growth-close-modal" aria-label="Yopish">×</button>${html}</div>`;
     backdrop.hidden = false;
   }
   function closeModal() {
     const backdrop = document.getElementById('growth-modal-backdrop');
     if (backdrop) backdrop.hidden = true;
+  }
+
+  let lbImages = [];
+  let lbIndex = 0;
+  function renderLightboxBody() {
+    const src = lbImages[lbIndex] || '';
+    return `<div class="lightbox-wrap">
+      <div class="lightbox-stage">
+        ${lbImages.length > 1 ? '<button type="button" class="lightbox-nav prev" data-action="lightbox-step" data-delta="-1" aria-label="Oldingi">‹</button>' : ''}
+        <img src="${esc(src)}" alt="Kattalashtirilgan rasm" class="lightbox-img">
+        ${lbImages.length > 1 ? '<button type="button" class="lightbox-nav next" data-action="lightbox-step" data-delta="1" aria-label="Keyingi">›</button>' : ''}
+      </div>
+      <div class="lightbox-counter">${lbIndex + 1} / ${lbImages.length}</div>
+    </div>`;
+  }
+  function openLightbox(images, startIndex = 0) {
+    lbImages = (Array.isArray(images) ? images : [images]).filter(Boolean);
+    if (!lbImages.length) return;
+    lbIndex = Math.max(0, Math.min(lbImages.length - 1, Number(startIndex) || 0));
+    showModal(renderLightboxBody(), 'lightbox-modal');
+  }
+  function stepLightbox(delta) {
+    if (!lbImages.length) return;
+    lbIndex = (lbIndex + Number(delta || 1) + lbImages.length) % lbImages.length;
+    showModal(renderLightboxBody(), 'lightbox-modal');
   }
 
   function openReceiptModal(r) {
@@ -207,9 +287,9 @@ window.MarketuzGrowth = (() => {
   }
 
   return {
-    getLang, setLang, t, applyLang,
+    getLang, setLang, t, statusLabel, applyLang,
     flashSaleActive, effectivePrice, flashBadgeHtml, startCountdowns,
-    installmentHint, socialProofHtml, uzpostMapHtml,
-    openReceiptModal, openShippingLabelModal, openOrderChatModal, closeModal
+    installmentHint, socialProofHtml, uzpostMapHtml, sellerSalesChartHtml,
+    openLightbox, stepLightbox, openReceiptModal, openShippingLabelModal, openOrderChatModal, closeModal
   };
 })();

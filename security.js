@@ -195,3 +195,25 @@ export async function recordAuthAttempt(pool, { kind, identifier, ip, success, u
     }
   }
 }
+
+export function createRateLimiter({ windowMs = 15 * 60_000, max = 30, keyFn = req => `${req.ip || 'ip'}:${req.user?.id || 'anon'}`, message = 'Juda ko‘p so‘rov yuborildi. Birozdan keyin urinib ko‘ring.' } = {}) {
+  const hits = new Map();
+  const cleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of hits) if (v.until <= now) hits.delete(k);
+  }, Math.max(60_000, windowMs));
+  cleanup.unref?.();
+  return (req, res, next) => {
+    const key = String(keyFn(req) || 'default').slice(0, 128);
+    const now = Date.now();
+    let entry = hits.get(key);
+    if (!entry || entry.until <= now) {
+      entry = { count: 0, until: now + windowMs };
+      hits.set(key, entry);
+    }
+    if (++entry.count > max) {
+      return res.status(429).json({ error: message });
+    }
+    next();
+  };
+}

@@ -520,3 +520,84 @@ test('Growth features: Q&A, photo review helpful vote, alerts, wallet cashback/r
     if (prevShip === undefined) delete process.env.SHIPPING_INCLUDED_IN_PRICE; else process.env.SHIPPING_INCLUDED_IN_PRICE = prevShip;
   }
 });
+
+test('Security hardening & new analytics/flash endpoints: Click OTP 5-fail lockout, sandboxed /media CSP, flashOnly feed, dailySales & securityPosture', async () => {
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevSandbox = process.env.CLICK_SANDBOX_MOCK;
+  const prevPayments = process.env.PAYMENTS_ENABLED;
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.CLICK_SANDBOX_MOCK = 'true';
+    process.env.PAYMENTS_ENABLED = 'false';
+
+    await withDbApp(async ({ req, base }) => {
+      const adminCookie = (await req('/auth/login', { method: 'POST', body: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } })).cookie;
+      const sellerCookie = (await req('/auth/register', { method: 'POST', body: { name: 'Sec Sotuvchi', email: 'secseller@example.com', password: 'StrongPass!2026', agree: true } })).cookie;
+      await req('/seller/request', { method: 'POST', cookie: sellerCookie, body: {} });
+      const sellerRow = (await req('/admin/sellers', { cookie: adminCookie })).data.sellers.find(s => s.email === 'secseller@example.com');
+      await req(`/admin/sellers/${sellerRow.id}`, { method: 'PATCH', cookie: adminCookie, body: { status: 'approved' } });
+
+      // Flash sale product & /catalog/feed?flashOnly=true filter
+      const pRes = await req('/seller/products', {
+        method: 'POST',
+        cookie: sellerCookie,
+        body: {
+          name: 'Flash Lamp',
+          description: 'Yorqin stol chirog‘i chegirmada.',
+          category: 'uy',
+          price: 180000,
+          flashSalePrice: 120000,
+          flashSaleUntil: new Date(Date.now() + 7200_000).toISOString(),
+          stock: 10,
+          stockMode: 'tracked',
+          restockDays: 3
+        }
+      });
+      const pid = pRes.data.product.id;
+      await req(`/admin/products/${pid}`, { method: 'PATCH', cookie: adminCookie, body: { status: 'active' } });
+      const flashFeed = (await req('/catalog/feed?flashOnly=true&limit=10')).data.products;
+      assert.equal(flashFeed.length, 1);
+      assert.equal(flashFeed[0].id, pid);
+
+      // Seller 7-day dailySales & Admin securityPosture
+      const sAnalytics = (await req('/seller/analytics', { cookie: sellerCookie })).data;
+      assert.equal(sAnalytics.dailySales.length, 7);
+      const mon = (await req('/admin/monitoring', { cookie: adminCookie })).data;
+      assert.equal(mon.securityPosture.cspStrict, true);
+      assert.equal(mon.securityPosture.sandboxedMedia, true);
+      assert.ok(mon.securityPosture.rateLimitersActive.includes('cardPay'));
+
+      // Sandboxed /media/:id security headers
+      const pngBytes = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082', 'hex');
+      const asset = await req('/assets', { method: 'POST', cookie: sellerCookie, body: { data: 'data:image/png;base64,' + pngBytes.toString('base64') } });
+      assert.equal(asset.status, 201);
+      const rootUrl = base.replace(/\/api$/, '');
+      const mediaResp = await fetch(rootUrl + asset.data.url);
+      assert.equal(mediaResp.status, 200);
+      assert.equal(mediaResp.headers.get('content-security-policy'), "default-src 'none'; sandbox");
+      assert.equal(mediaResp.headers.get('cross-origin-resource-policy'), 'same-origin');
+
+      // Click OTP 5 wrong attempts lockout
+      const buyerCookie = (await req('/auth/register', { method: 'POST', body: { name: 'Sec Buyer', email: 'secbuyer@example.com', password: 'StrongPass!2026', agree: true } })).cookie;
+      const ord = await req('/orders', {
+        method: 'POST',
+        cookie: buyerCookie,
+        body: { recipient: 'Sec Buyer', phone: '+998 90 444 55 66', deliveryMode: 'courier', region: 'Toshkent shahri', district: 'Yunusobod tumani', address: 'Chorsu 1', paymentMethod: 'click', checkoutKey: randomUUID(), agree: true, items: [{ id: pid, qty: 1 }] }
+      });
+      const cr = await req('/payments/click/card-request', { method: 'POST', cookie: buyerCookie, body: { orderId: ord.data.id, cardNumber: '8600 0000 0000 0007', expireDate: '12/28' } });
+      const wrongOtp = cr.data.sandboxSmsCode === '111111' ? '222222' : '111111';
+      for (let i = 0; i < 4; i++) {
+        const failRes = await req('/payments/click/card-verify', { method: 'POST', cookie: buyerCookie, body: { orderId: ord.data.id, smsCode: wrongOtp } });
+        assert.equal(failRes.status, 400);
+      }
+      const fifth = await req('/payments/click/card-verify', { method: 'POST', cookie: buyerCookie, body: { orderId: ord.data.id, smsCode: wrongOtp } });
+      assert.equal(fifth.status, 429);
+      const afterLock = await req('/payments/click/card-verify', { method: 'POST', cookie: buyerCookie, body: { orderId: ord.data.id, smsCode: cr.data.sandboxSmsCode } });
+      assert.equal(afterLock.status, 400);
+    });
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevSandbox === undefined) delete process.env.CLICK_SANDBOX_MOCK; else process.env.CLICK_SANDBOX_MOCK = prevSandbox;
+    if (prevPayments === undefined) delete process.env.PAYMENTS_ENABLED; else process.env.PAYMENTS_ENABLED = prevPayments;
+  }
+});
