@@ -27,6 +27,7 @@ import { canAdvanceOrder, checkoutContainsCardData } from './order-safety.js';
 import { buildInterests, rankProducts } from './recommendations.js';
 import { templateWorkbook, parseWorkbook } from './product-import.js';
 import { computePromoDiscount, createNotification, mountMarketplaceFeatures } from './marketplace-features.js';
+import { effectivePrice, mountGrowthFeatures, notifyProductWatchers, notifyTelegramPhone, releaseOrderEscrow, runAbandonedCartReminders } from './growth-features.js';
 import { calculateShipping, getBranchById } from './shipping.js';
 
 try { process.loadEnvFile?.(); } catch {}
@@ -153,7 +154,7 @@ async function resolveSession(req) {
   const data = tokenData(raw);
   if (!data || !pool) return null;
   const { rows } = await pool.query(
-    `SELECT u.id, u.full_name, u.email, u.phone, u.verified_phone, u.role, u.seller_status, u.avatar_url, u.cover_url, u.bio, u.personalization_enabled, u.totp_enabled, u.telegram_id, s.id AS sid, s.last_active_at
+    `SELECT u.id, u.full_name, u.email, u.phone, u.verified_phone, u.role, u.seller_status, u.avatar_url, u.cover_url, u.bio, u.personalization_enabled, u.totp_enabled, u.telegram_id, u.bonus_balance, u.seller_balance, s.id AS sid, s.last_active_at
      FROM user_sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.id=$1 AND s.user_id=$2 AND s.token_hash=$3 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.deleted_at IS NULL`,
@@ -206,7 +207,7 @@ app.post('/api/assets', requireDb, auth, route(async(req,res)=>{
   await pool.query('INSERT INTO site_assets(id,owner_id,mime,bytes,size_bytes) VALUES($1,$2,$3,$4,$5)',[id,req.user.id,mime,bytes,bytes.length]);
   res.status(201).json({url:'/media/'+id,size:bytes.length});
 }));
-const catalogFields='id,seller_id,name,description,category,subcategory,brand,price,old_price,stock,stock_mode,restock_days,sold_count,rating_avg,rating_count,image_url,card_background,detail_background,badge,external_links,variant_count,created_at';
+const catalogFields='id,seller_id,name,description,category,subcategory,brand,price,old_price,flash_sale_price,flash_sale_until,is_promoted,promoted_until,bundle_discount_percent,stock,stock_mode,restock_days,sold_count,rating_avg,rating_count,image_url,card_background,detail_background,badge,external_links,variant_count,created_at';
 const feedSort={ newest:{order:'id DESC',key:'id'}, price_asc:{order:'price ASC,id DESC',key:'price'},price_desc:{order:'price DESC,id DESC',key:'price'},popular:{order:'sold_count DESC,id DESC',key:'sold_count'},rating:{order:'rating_avg DESC,id DESC',key:'rating_avg'} };
 const encodeCursor=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
 const decodeCursor=(value,sort,q,category)=>{
@@ -242,7 +243,7 @@ app.get('/api/catalog/feed',route(async(req,res)=>{
   const q=text(req.query.q,80),category=text(req.query.category,40),subcategory=text(req.query.subcategory,80),sort=feedSort[req.query.sort]?req.query.sort:'newest';
   const minPrice=Math.max(0,Number.parseInt(req.query.minPrice,10)||0),maxPrice=Math.max(0,Number.parseInt(req.query.maxPrice,10)||0);
   const minRating=Math.min(5,Math.max(0,Number(req.query.minRating)||0));
-  const inStock=req.query.inStock==='true';
+  const inStock=req.query.inStock==='true', flashOnly=req.query.flashOnly==='true';
   const limit=Math.min(36,Math.max(1,Number.parseInt(req.query.limit,10)||24));
   const cursor=decodeCursor(req.query.cursor,sort,q,category), config=feedSort[sort];
   if(category && !site.categories.some(x=>x.id===category)) return res.json({products:[],nextCursor:null,hasMore:false});
@@ -260,6 +261,7 @@ app.get('/api/catalog/feed',route(async(req,res)=>{
   if(maxPrice>0){params.push(maxPrice);where.push(`price<=$${params.length}`);}
   if(minRating>0){params.push(minRating);where.push(`rating_avg>=$${params.length}`);}
   if(inStock){where.push("(stock_mode='replenishable' OR stock>0)");}
+  if(flashOnly){where.push("flash_sale_price >= 1000 AND (flash_sale_until IS NULL OR flash_sale_until > now())");}
   if(cursor){params.push(cursor[3],cursor[4]);const a=params.length-1,b=params.length;where.push(config.key==='id'?`id<$${b}`:sort==='price_asc'?`(price>$${a} OR (price=$${a} AND id<$${b}))`:`(${config.key}<$${a} OR (${config.key}=$${a} AND id<$${b}))`);}
   params.push(limit+1);
   const {rows}=await pool.query(`SELECT ${catalogFields} FROM products WHERE ${where.join(' AND ')} ORDER BY ${config.order} LIMIT $${params.length}`,params);
@@ -269,7 +271,7 @@ app.get('/api/catalog/feed',route(async(req,res)=>{
 app.get('/api/catalog', route(async (req, res) => {
   const q = text(req.query.q, 80), category = text(req.query.category, 40), sort = text(req.query.sort, 20);
   const page = Math.min(100, Math.max(1, Number.parseInt(req.query.page, 10) || 1)), limit = 16;
-  const order = { newest: 'id DESC', price_asc: 'price ASC, id DESC', price_desc: 'price DESC, id DESC', popular: 'sold_count DESC,id DESC' }[sort] || 'id DESC';
+  const order = { newest: '(CASE WHEN is_promoted AND (promoted_until IS NULL OR promoted_until > now()) THEN 0 ELSE 1 END), id DESC', price_asc: 'price ASC, id DESC', price_desc: 'price DESC, id DESC', popular: '(CASE WHEN is_promoted AND (promoted_until IS NULL OR promoted_until > now()) THEN 0 ELSE 1 END), sold_count DESC,id DESC' }[sort] || 'id DESC';
   if (demoOnly) { let p = inMemoryCatalog.filter(x => (!q || (x.name + ' ' + x.description).toLowerCase().includes(q.toLowerCase())) && (!category || x.category === category)); p = sort === 'price_asc' ? p.sort((a,b) => a.price-b.price) : sort === 'price_desc' ? p.sort((a,b) => b.price-a.price) : p; return res.json({ products: p.slice((page-1)*limit,page*limit), total: p.length, page, pages: Math.ceil(p.length/limit) }); }
   const where = ['status=$1']; const params = ['active'];
   if (q) { params.push('%' + q.replace(/[\\%_]/g, '\\$&') + '%'); where.push(`(name ILIKE $${params.length} ESCAPE '\\' OR description ILIKE $${params.length} ESCAPE '\\')`); }
@@ -635,7 +637,7 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
       }
     }
     const ids = [...new Set(items.map(x=>x.id))].sort((a,b) => a-b);
-    const locked = await db.query('SELECT id,name,price,stock,stock_mode,image_url,seller_id,variant_count FROM products WHERE id=ANY($1::bigint[]) AND status=$2 ORDER BY id FOR UPDATE', [ids,'active']);
+    const locked = await db.query('SELECT id,name,price,flash_sale_price,flash_sale_until,bundle_discount_percent,stock,stock_mode,image_url,seller_id,variant_count FROM products WHERE id=ANY($1::bigint[]) AND status=$2 ORDER BY id FOR UPDATE', [ids,'active']);
     if (locked.rows.length !== ids.length) throw fail(409, 'Savatdagi ayrim mahsulotlar endi mavjud emas.');
     let subtotal = 0; const detailed = [];
     const variantIds=items.map(i=>i.variantId).filter(Boolean).sort((a,b)=>a-b);
@@ -644,7 +646,10 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
       const p=locked.rows.find(x=>Number(x.id)===item.id),v=item.variantId?variants.find(x=>Number(x.id)===item.variantId):null;
       if((p.variant_count>0 && (!v || Number(v.product_id)!==item.id)) || (p.variant_count===0 && item.variantId))throw fail(409,`${p.name}: variantni qayta tanlang.`);
       if(p.stock_mode!=='replenishable' && (v?v.stock:p.stock)<item.qty)throw fail(409,`${p.name}: ombordagi miqdor yetarli emas.`);
-      const price=v?v.price:p.price;subtotal+=price*item.qty;
+      const unitBase = v ? v.price : effectivePrice(p);
+      const bundlePct = (item.qty >= 2 && Number(p.bundle_discount_percent || 0) > 0) ? Math.min(40, Number(p.bundle_discount_percent)) : 0;
+      const price = bundlePct ? Math.max(1000, Math.round(unitBase * (100 - bundlePct) / 100)) : unitBase;
+      subtotal+=price*item.qty;
       if(subtotal>2_000_000_000) throw fail(400,'Buyurtma summasi limitdan oshdi.');
       detailed.push({...p,qty:item.qty,variantId:v?.id||null,variantLabel:v?.label||'',price,image_url:v?.image_url||p.image_url});
     }
@@ -658,10 +663,25 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
       discountAmount = check.discount;
       await db.query('UPDATE promo_codes SET used_count = used_count + 1 WHERE id=$1', [promo.id]);
     }
-    const deliveryFee = 0;
-    const finalTotal = Math.max(1000, subtotal - discountAmount + deliveryFee);
+    let bonusUsed = 0;
     const id = randomUUID();
-    await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,delivery_fee,total,status,payment_status,checkout_key,promo_code,discount_amount,delivery_mode,pickup_branch_id,pickup_branch_label) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,deliveryFee,finalTotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending',checkoutKey,promoCode,discountAmount,deliveryMode,pickupBranchId,pickupBranchLabel]);
+    const receiptNo = 'MKT-' + id.slice(0, 8).toUpperCase();
+    if (body.useBonus === true && subtotal - discountAmount > 1000) {
+      const { rows: [buyerWallet] } = await db.query('SELECT bonus_balance FROM users WHERE id=$1 FOR UPDATE', [req.user.id]);
+      const availBonus = Number(buyerWallet?.bonus_balance || 0);
+      if (availBonus > 0) {
+        bonusUsed = Math.min(availBonus, Math.max(0, (subtotal - discountAmount) - 1000));
+        if (bonusUsed > 0) {
+          await db.query('UPDATE users SET bonus_balance = bonus_balance - $2 WHERE id=$1', [req.user.id, bonusUsed]);
+        }
+      }
+    }
+    const deliveryFee = 0;
+    const finalTotal = Math.max(1000, subtotal - discountAmount - bonusUsed + deliveryFee);
+    await db.query('INSERT INTO orders(id,buyer_id,recipient,phone,region,district,address,note,payment_method,subtotal,delivery_fee,total,status,payment_status,checkout_key,promo_code,discount_amount,bonus_used,receipt_number,delivery_mode,pickup_branch_id,pickup_branch_label) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)', [id,req.user.id,recipient,phone,region,district,address,note,method,subtotal,deliveryFee,finalTotal,method==='cod'?'new':'awaiting_payment',method==='cod'?'unpaid':'pending',checkoutKey,promoCode,discountAmount,bonusUsed,receiptNo,deliveryMode,pickupBranchId,pickupBranchLabel]);
+    if (bonusUsed > 0) {
+      await db.query('INSERT INTO wallet_transactions(user_id, amount, kind, note, order_id) VALUES($1,$2,$3,$4,$5)', [req.user.id, -bonusUsed, 'bonus_redeem', `Buyurtma #${id.slice(0, 8).toUpperCase()} uchun bonus ishlatildi`, id]);
+    }
     for (const p of detailed) {
       await db.query("UPDATE products SET stock=CASE WHEN stock_mode='tracked' THEN stock-$1 ELSE stock END,sold_count=sold_count+$1,updated_at=now() WHERE id=$2", [p.qty,p.id]);
       if(p.variantId&&p.stock_mode==='tracked')await db.query('UPDATE product_variants SET stock=stock-$1,updated_at=now() WHERE id=$2',[p.qty,p.variantId]);
@@ -674,7 +694,9 @@ app.post('/api/orders', requireDb, auth, route(async (req, res) => {
       body: method === 'cod' ? 'Operator tasdiqlashi kutilmoqda.' : 'Onlayn to‘lovni yakunlang.',
       href: '/account?tab=orders'
     });
-    await db.query('COMMIT'); res.status(201).json({ id, subtotal, discountAmount, total: finalTotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:(method==='click'?`/pay/${id}`:paymentUrl(method,id,finalTotal)), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. Karta orqali to‘lovni yakunlash uchun to‘lov sahifasiga o‘ting.' });
+    await db.query('COMMIT');
+    notifyTelegramPhone(pool, telegramTransport, req.user.verified_phone || phone, `🛍️ Marketuz buyurtma #${id.slice(0, 8).toUpperCase()} yaratildi!\nJami to‘lov: ${new Intl.NumberFormat('uz-UZ').format(finalTotal)} so‘m\nHolati: ${method === 'cod' ? 'Yangi (yetkazilganda)' : 'Karta to‘lovi kutilmoqda'}`).catch(() => {});
+    res.status(201).json({ id, subtotal, discountAmount, bonusUsed, total: finalTotal, status: method==='cod'?'new':'awaiting_payment', paymentUrl:method==='cod'?null:(method==='click'?`/pay/${id}`:paymentUrl(method,id,finalTotal)), message: method==='cod'?'Buyurtma qabul qilindi. Yetkazish narxi operator tasdiqlagach aniqlanadi.':'Buyurtma yaratildi. Karta orqali to‘lovni yakunlash uchun to‘lov sahifasiga o‘ting.' });
   } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
 }));
 app.get('/api/orders', requireDb, auth, route(async (req, res) => {
@@ -704,7 +726,7 @@ app.get('/api/orders/:id/payment-link', requireDb, auth, route(async(req,res)=>{
 }));
 async function cancelOrder(id, buyerId) {
   const db = await pool.connect();
-  try { await db.query('BEGIN'); const { rows } = await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id]); const o = rows[0]; if (!o || (buyerId && String(o.buyer_id) !== String(buyerId))) throw fail(404,'Buyurtma topilmadi.'); if (!['awaiting_payment','new','accepted','packing'].includes(o.status) || o.payment_status==='paid') throw fail(409,'Bu buyurtmani bekor qilib bo‘lmaydi.'); const reserved=await db.query('SELECT id FROM payment_transactions WHERE order_id=$1 AND state=1 LIMIT 1',[id]); if(reserved.rowCount) throw fail(409,'To‘lov jarayonda. Yakunlanishini kuting.'); await db.query("UPDATE orders SET status='cancelled',payment_status=CASE WHEN payment_status='pending' THEN 'cancelled' ELSE payment_status END,updated_at=now() WHERE id=$1",[id]); await db.query('INSERT INTO shipment_events(order_id,source,status,tracking_number) VALUES($1,$2,$3,$4)',[id,buyerId?'buyer':'admin','cancelled',o.tracking_number]); const items = await db.query('SELECT product_id,variant_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[id]); for(const x of items.rows){if(x.variant_id&&x.stock_reserved)await db.query('UPDATE product_variants SET stock=stock+$1 WHERE id=$2',[x.quantity,x.variant_id]);await db.query('UPDATE products p SET stock=CASE WHEN p.variant_count>0 THEN (SELECT coalesce(sum(v.stock),0) FROM product_variants v WHERE v.product_id=p.id AND v.active) WHEN $4::bigint IS NULL AND $1::int>0 THEN p.stock+$1 ELSE p.stock END,sold_count=GREATEST(0,sold_count-$2) WHERE p.id=$3',[x.stock_reserved?x.quantity:0,x.quantity,x.product_id,x.variant_id]);} await db.query('COMMIT'); return o; } catch(e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
+  try { await db.query('BEGIN'); const { rows } = await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id]); const o = rows[0]; if (!o || (buyerId && String(o.buyer_id) !== String(buyerId))) throw fail(404,'Buyurtma topilmadi.'); if (!['awaiting_payment','new','accepted','packing'].includes(o.status) || o.payment_status==='paid') throw fail(409,'Bu buyurtmani bekor qilib bo‘lmaydi.'); const reserved=await db.query('SELECT id FROM payment_transactions WHERE order_id=$1 AND state=1 LIMIT 1',[id]); if(reserved.rowCount) throw fail(409,'To‘lov jarayonda. Yakunlanishini kuting.'); await db.query("UPDATE orders SET status='cancelled',payment_status=CASE WHEN payment_status='pending' THEN 'cancelled' ELSE payment_status END,updated_at=now() WHERE id=$1",[id]); if(Number(o.bonus_used||0)>0 && o.buyer_id){ await db.query('UPDATE users SET bonus_balance=bonus_balance+$1 WHERE id=$2',[o.bonus_used,o.buyer_id]); await db.query('INSERT INTO wallet_transactions(user_id,amount,kind,note,order_id) VALUES($1,$2,$3,$4,$5)',[o.buyer_id,o.bonus_used,'bonus_refund',`Buyurtma #${String(id).slice(0,8).toUpperCase()} bekor qilingani uchun bonus qaytarildi`,id]); } await db.query('INSERT INTO shipment_events(order_id,source,status,tracking_number) VALUES($1,$2,$3,$4)',[id,buyerId?'buyer':'admin','cancelled',o.tracking_number]); const items = await db.query('SELECT product_id,variant_id,quantity,stock_reserved FROM order_items WHERE order_id=$1',[id]); for(const x of items.rows){if(x.variant_id&&x.stock_reserved)await db.query('UPDATE product_variants SET stock=stock+$1 WHERE id=$2',[x.quantity,x.variant_id]);await db.query('UPDATE products p SET stock=CASE WHEN p.variant_count>0 THEN (SELECT coalesce(sum(v.stock),0) FROM product_variants v WHERE v.product_id=p.id AND v.active) WHEN $4::bigint IS NULL AND $1::int>0 THEN p.stock+$1 ELSE p.stock END,sold_count=GREATEST(0,sold_count-$2) WHERE p.id=$3',[x.stock_reserved?x.quantity:0,x.quantity,x.product_id,x.variant_id]);} await db.query('COMMIT'); return o; } catch(e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
 }
 app.post('/api/orders/:id/cancel', requireDb, auth, route(async (req,res) => { await cancelOrder(req.params.id,req.user.id); res.json({ ok:true }); }));
 
@@ -717,8 +739,11 @@ app.get('/api/seller/products', requireDb, auth, role('seller'), route(async (re
 function productInput(body) {
   const specs=body.specifications??{}, gallery=body.gallery??[], variants=body.variants??[];
   if(!specs || Array.isArray(specs) || typeof specs!=='object' || Object.keys(specs).length>24 || !Array.isArray(gallery) || gallery.length>12 || !Array.isArray(variants) || variants.length>30) throw fail(400,'Rasm, xususiyat yoki variantlar soni juda katta.');
-  const p = { name:text(body.name,180), description:text(body.description,4000), category:text(body.category,40),subcategory:text(body.subcategory,80),brand:text(body.brand,100),sku:text(body.sku,80), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), stock:Number(body.stock),stockMode:text(body.stockMode||'tracked',20),restockDays:Number(body.restockDays||7), image:text(body.image,1000)||'/assets/product-placeholder.svg', cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]),gallery:gallery.map(x=>text(x,1000)),specifications:Object.fromEntries(Object.entries(specs).map(([k,v])=>[text(k,70),text(v,200)])),variants:variants.map(v=>({id:v.id?Number(v.id):null,label:text(v.label,100),sku:text(v.sku,80),price:Number(v.price),stock:Number(v.stock),image:text(v.image,1000)})) };
+  const rawFlashUntil = text(body.flashSaleUntil, 40);
+  const flashSaleUntil = rawFlashUntil && !Number.isNaN(Date.parse(rawFlashUntil)) ? new Date(rawFlashUntil).toISOString() : null;
+  const p = { name:text(body.name,180), description:text(body.description,4000), category:text(body.category,40),subcategory:text(body.subcategory,80),brand:text(body.brand,100),sku:text(body.sku,80), price:Number(body.price), oldPrice:Number(body.oldPrice || 0), flashSalePrice:Math.max(0, Number(body.flashSalePrice || 0)), flashSaleUntil, bundleDiscountPercent:Math.min(40, Math.max(0, Number.parseInt(body.bundleDiscountPercent || 0, 10) || 0)), stock:Number(body.stock),stockMode:text(body.stockMode||'tracked',20),restockDays:Number(body.restockDays||7), image:text(body.image,1000)||'/assets/product-placeholder.svg', cardBackground:text(body.cardBackground,1000),detailBackground:text(body.detailBackground,1000), externalLinks:externalLinks(body.externalLinks||[]),gallery:gallery.map(x=>text(x,1000)),specifications:Object.fromEntries(Object.entries(specs).map(([k,v])=>[text(k,70),text(v,200)])),variants:variants.map(v=>({id:v.id?Number(v.id):null,label:text(v.label,100),sku:text(v.sku,80),price:Number(v.price),stock:Number(v.stock),image:text(v.image,1000)})) };
   if (p.name.length < 3 || !site.categories.some(c=>c.id === p.category) || !Number.isSafeInteger(p.price) || p.price < 1000 || p.price > 1e9 || !Number.isSafeInteger(p.stock) || p.stock < 0 || p.stock > 100000 || !['tracked','replenishable'].includes(p.stockMode) || !Number.isSafeInteger(p.restockDays) || p.restockDays<1 || p.restockDays>90 || !imageOk(p.image) || (p.cardBackground&&!imageOk(p.cardBackground)) || (p.detailBackground&&!imageOk(p.detailBackground)) || !Number.isSafeInteger(p.oldPrice) || p.oldPrice < 0 || p.oldPrice > 1e9) throw fail(400,'Mahsulot nomi, narxi, soni va rasmlarini tekshiring.');
+  if (p.flashSalePrice > 0 && (!Number.isSafeInteger(p.flashSalePrice) || p.flashSalePrice < 1000 || p.flashSalePrice >= p.price)) throw fail(400,'Aksiya narxi asosiy narxdan kam va kamida 1000 so‘m bo‘lsin.');
   if(p.gallery.some(x=>!imageOk(x)) || Object.entries(p.specifications).some(([k,v])=>!k||!v) || p.variants.some(v=>(v.id!==null&&(!Number.isSafeInteger(v.id)||v.id<1))||!v.label||!Number.isSafeInteger(v.price)||v.price<1000||v.price>1e9||!Number.isSafeInteger(v.stock)||v.stock<0||v.stock>100000||(v.image&&!imageOk(v.image)))) throw fail(400,'Galereya, xususiyat yoki variantlarni tekshiring.');
   if(new Set(p.variants.filter(v=>v.id).map(v=>v.id)).size!==p.variants.filter(v=>v.id).length || new Set(p.variants.filter(v=>v.sku).map(v=>v.sku.toLowerCase())).size!==p.variants.filter(v=>v.sku).length) throw fail(400,'Variant ID yoki SKU takrorlangan.');
   return p;
@@ -730,14 +755,15 @@ async function checkSubcategory(db,p){
 }
 async function saveProduct(db,p,{id=null,sellerId=null,status='pending'}={}){
   await checkSubcategory(db,p);
-  const values=[p.name,p.description,p.category,p.subcategory,p.brand,p.sku,p.price,p.oldPrice||null,p.variants.length?0:p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),JSON.stringify(p.gallery),JSON.stringify(p.specifications),status];
-  let product;
+  const values=[p.name,p.description,p.category,p.subcategory,p.brand,p.sku,p.price,p.oldPrice||null,p.flashSalePrice||0,p.flashSaleUntil,p.bundleDiscountPercent||0,p.variants.length?0:p.stock,p.stockMode,p.restockDays,p.image,p.cardBackground,p.detailBackground,JSON.stringify(p.externalLinks),JSON.stringify(p.gallery),JSON.stringify(p.specifications),status];
+  let product, prev=null;
   if(id){
-    const existing=(await db.query('SELECT id,seller_id,status FROM products WHERE id=$1 FOR UPDATE',[id])).rows[0];
+    const existing=(await db.query('SELECT id,seller_id,status,price,stock FROM products WHERE id=$1 FOR UPDATE',[id])).rows[0];
     if(!existing || (sellerId!==null && String(existing.seller_id)!==String(sellerId)) || (sellerId!==null&&existing.status==='archived'))throw fail(404,'Mahsulot topilmadi.');
-    product=(await db.query(`UPDATE products SET name=$1,description=$2,category=$3,subcategory=$4,brand=$5,sku=$6,price=$7,old_price=$8,stock=$9,stock_mode=$10,restock_days=$11,image_url=$12,card_background=$13,detail_background=$14,external_links=$15,gallery=$16,specifications=$17,status=$18,updated_at=now() WHERE id=$19 RETURNING *`,[...values,id])).rows[0];
+    prev = existing;
+    product=(await db.query(`UPDATE products SET name=$1,description=$2,category=$3,subcategory=$4,brand=$5,sku=$6,price=$7,old_price=$8,flash_sale_price=$9,flash_sale_until=$10,bundle_discount_percent=$11,stock=$12,stock_mode=$13,restock_days=$14,image_url=$15,card_background=$16,detail_background=$17,external_links=$18,gallery=$19,specifications=$20,status=$21,updated_at=now() WHERE id=$22 RETURNING *`,[...values,id])).rows[0];
   }else{
-    product=(await db.query(`INSERT INTO products(seller_id,name,description,category,subcategory,brand,sku,price,old_price,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,gallery,specifications,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,[sellerId,...values])).rows[0];
+    product=(await db.query(`INSERT INTO products(seller_id,name,description,category,subcategory,brand,sku,price,old_price,flash_sale_price,flash_sale_until,bundle_discount_percent,stock,stock_mode,restock_days,image_url,card_background,detail_background,external_links,gallery,specifications,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,[sellerId,...values])).rows[0];
   }
   const keep=p.variants.filter(v=>v.id).map(v=>v.id);
   await db.query('UPDATE product_variants SET active=false WHERE product_id=$1 AND active=true AND NOT(id=ANY($2::bigint[]))',[product.id,keep]);
@@ -747,11 +773,12 @@ async function saveProduct(db,p,{id=null,sellerId=null,status='pending'}={}){
   }
   if(p.variants.length)product=(await db.query('UPDATE products SET stock=(SELECT coalesce(sum(stock),0) FROM product_variants WHERE product_id=$1 AND active),price=(SELECT min(price) FROM product_variants WHERE product_id=$1 AND active),variant_count=$2 WHERE id=$1 RETURNING *',[product.id,p.variants.length])).rows[0];
   else product=(await db.query('UPDATE products SET variant_count=0 WHERE id=$1 RETURNING *',[product.id])).rows[0];
+  product._prev = prev;
   return product;
 }
 async function saveProductRequest(req,{id=null,sellerId=null,status='pending'}={}){
   const p=productInput(req.body),db=await pool.connect();
-  try {await db.query('BEGIN');const product=await saveProduct(db,p,{id,sellerId,status});await db.query('COMMIT');return product;}
+  try {await db.query('BEGIN');const product=await saveProduct(db,p,{id,sellerId,status});await db.query('COMMIT');if(product._prev){notifyProductWatchers(pool,product,{oldPrice:Number(product._prev.price),oldStock:Number(product._prev.stock),createNotification,telegramTransport}).catch(()=>{});delete product._prev;}return product;}
   catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
 }
 app.get('/api/subcategories',route(async(req,res)=>{if(demoOnly)return res.json({subcategories:[]});const {rows}=await pool.query('SELECT id,category,name FROM product_subcategories WHERE category=ANY($1::text[]) ORDER BY category,name',[site.categories.map(c=>c.id)]);res.json({subcategories:rows});}));
@@ -804,7 +831,7 @@ app.post('/api/admin/products', requireDb, auth, role('admin'), route(async(req,
   if(!['active','pending'].includes(status)) throw fail(400,'Yangi mahsulot holati xato.');
   const product=await saveProductRequest(req,{status});await logAudit(pool,{actorId:req.user.id,action:'admin_product_created',targetType:'product',targetId:String(product.id),req,details:{status}});res.status(201).json({product});
 }));
-app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const pid=idParam(req.params.id),status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,pid]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); await logAudit(pool,{actorId:req.user.id,action:'admin_product_'+status,targetType:'product',targetId:pid,req}); res.json({product:rows[0]}); }));
+app.patch('/api/admin/products/:id', requireDb, auth, role('admin'), route(async (req,res) => { const pid=idParam(req.params.id),status=text(req.body.status,20); if(!['active','rejected','archived'].includes(status)) throw fail(400,'Status xato.'); const prev=(await pool.query('SELECT price,stock FROM products WHERE id=$1',[pid])).rows[0]; const {rows}=await pool.query('UPDATE products SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[status,pid]); if(!rows[0]) throw fail(404,'Mahsulot topilmadi.'); if(status==='active'&&prev){notifyProductWatchers(pool,rows[0],{oldPrice:Number(prev.price)+1,oldStock:0,createNotification,telegramTransport}).catch(()=>{});} await logAudit(pool,{actorId:req.user.id,action:'admin_product_'+status,targetType:'product',targetId:pid,req}); res.json({product:rows[0]}); }));
 app.patch('/api/admin/products/:id/details', requireDb, auth, role('admin'), route(async(req,res)=>{
   const pid=idParam(req.params.id),status=text(req.body.status,20);
   if(!['active','pending','rejected','archived'].includes(status)) throw fail(400,'Mahsulot holati xato.');
@@ -852,14 +879,32 @@ app.patch('/api/admin/orders/:id', requireDb, auth, role('admin'), route(async (
       order=(await db.query('UPDATE orders SET status=$1,tracking_number=$2,updated_at=now() WHERE id=$3 RETURNING *',[status,trackingNumber,current.id])).rows[0];
       await db.query('INSERT INTO shipment_events(order_id,source,status,tracking_number) VALUES($1,$2,$3,$4)',[order.id,'admin',status,trackingNumber]);
     }
+    if(status==='delivered') await releaseOrderEscrow(db, order.id, createNotification);
     await db.query('COMMIT');
+    if(status!==current.status && order.buyer_id){
+      const labels={accepted:'Tasdiqlandi',packing:'Qadoqlanmoqda',handed_over:'UzPostga topshirildi',in_transit:'Yo‘lda',delivered:'Yetkazib berildi'};
+      createNotification(pool,{userId:order.buyer_id,kind:'order',title:`Buyurtma #${String(order.id).slice(0,8).toUpperCase()}: ${labels[status]||status}`,body:trackingNumber?`Kuzatuv raqami: ${trackingNumber}`:'',href:'/account?tab=orders'}).catch(()=>{});
+      notifyTelegramPhone(pool,telegramTransport,order.phone,`📦 Buyurtma #${String(order.id).slice(0,8).toUpperCase()} holati: ${labels[status]||status}${trackingNumber?`\nKuzatuv raqami: ${trackingNumber}`:''}`).catch(()=>{});
+    }
     await logAudit(pool,{actorId:req.user.id,action:'admin_order_updated',targetType:'order',targetId:order.id,req,details:{status,trackingNumber}});
     res.json({order});
   }catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
 }));
 
-mountPayments(app,pool,gatewayConfigured,{auth,route,fail,requireDb});
+mountPayments(app,pool,gatewayConfigured,{auth,route,fail,requireDb,onOrderPaid:async(db,orderId)=>{
+  await releaseOrderEscrow(db,orderId,createNotification);
+  setImmediate(async()=>{
+    try{
+      const {rows:[o]}=await pool.query('SELECT id,phone,total,buyer_id FROM orders WHERE id=$1',[orderId]);
+      if(o){
+        const u=o.buyer_id?(await pool.query('SELECT verified_phone FROM users WHERE id=$1',[o.buyer_id])).rows[0]:null;
+        await notifyTelegramPhone(pool,telegramTransport,u?.verified_phone||o.phone,`✅ Marketuz #${String(o.id).slice(0,8).toUpperCase()} buyurtma to‘lovi (${new Intl.NumberFormat('uz-UZ').format(o.total)} so‘m) tasdiqlandi! +2% keshbek balansingizga qo‘shildi.`);
+      }
+    }catch{}
+  });
+}});
 mountMarketplaceFeatures(app,{pool,requireDb,auth,role,route,fail,text,idParam});
+mountGrowthFeatures(app,{pool,requireDb,auth,role,route,fail,text,idParam,createNotification,telegramTransport,getLegal:()=>site.legal});
 
 const htmlEsc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const absolute=(url,base)=>{try{return new URL(url,base).href;}catch{return base;}};
@@ -964,6 +1009,8 @@ function startBackgroundJobs() {
   };
   expire();
   timers.push(setInterval(expire, 5 * 60_000).unref());
+  const cartRemind = () => runAbandonedCartReminders({ pool, createNotification, telegramTransport }).catch(() => {});
+  timers.push(setInterval(cartRemind, 15 * 60_000).unref());
   return timers;
 }
 

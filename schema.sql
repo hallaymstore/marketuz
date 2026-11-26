@@ -335,3 +335,105 @@ CREATE TABLE IF NOT EXISTS telegram_phone_links (
  verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_telegram_links_chat ON telegram_phone_links(chat_id);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_balance BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS seller_balance BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE products ADD COLUMN IF NOT EXISTS flash_sale_price BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS flash_sale_until TIMESTAMPTZ;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS is_promoted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS promoted_until TIMESTAMPTZ;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS bundle_discount_percent INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS bonus_used BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS bonus_earned BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS escrow_released BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS receipt_number VARCHAR(64) NOT NULL DEFAULT '';
+
+ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS photos JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS helpful_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS selected BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS product_questions (
+ id BIGSERIAL PRIMARY KEY,
+ product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+ user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ author_name VARCHAR(120) NOT NULL,
+ question TEXT NOT NULL,
+ answer TEXT NOT NULL DEFAULT '',
+ answered_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ answered_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_product_questions_product ON product_questions(product_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS review_votes (
+ review_id BIGINT NOT NULL REFERENCES product_reviews(id) ON DELETE CASCADE,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY (review_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ amount BIGINT NOT NULL,
+ kind VARCHAR(40) NOT NULL,
+ note VARCHAR(240) NOT NULL DEFAULT '',
+ order_id UUID REFERENCES orders(id) ON DELETE SET NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user ON wallet_transactions(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS seller_payouts (
+ id BIGSERIAL PRIMARY KEY,
+ seller_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ amount BIGINT NOT NULL CHECK (amount > 0),
+ card_mask VARCHAR(32) NOT NULL DEFAULT '',
+ recipient_name VARCHAR(120) NOT NULL DEFAULT '',
+ status VARCHAR(24) NOT NULL DEFAULT 'requested',
+ admin_note VARCHAR(240) NOT NULL DEFAULT '',
+ processed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_seller_payouts_seller ON seller_payouts(seller_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS product_alerts (
+ id BIGSERIAL PRIMARY KEY,
+ product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ alert_type VARCHAR(24) NOT NULL,
+ target_price BIGINT NOT NULL DEFAULT 0,
+ active BOOLEAN NOT NULL DEFAULT TRUE,
+ last_notified_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE (product_id, user_id, alert_type)
+);
+CREATE INDEX IF NOT EXISTS idx_product_alerts_product ON product_alerts(product_id, active);
+
+CREATE TABLE IF NOT EXISTS order_messages (
+ id BIGSERIAL PRIMARY KEY,
+ order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+ sender_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+ sender_role VARCHAR(24) NOT NULL DEFAULT 'buyer',
+ sender_name VARCHAR(120) NOT NULL DEFAULT '',
+ message TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_order_messages_order ON order_messages(order_id, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS card_tokens (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ provider VARCHAR(32) NOT NULL DEFAULT 'click',
+ card_token TEXT NOT NULL,
+ card_mask VARCHAR(32) NOT NULL DEFAULT '',
+ card_type VARCHAR(32) NOT NULL DEFAULT '',
+ is_default BOOLEAN NOT NULL DEFAULT FALSE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE (user_id, provider, card_token)
+);
+CREATE INDEX IF NOT EXISTS idx_card_tokens_user ON card_tokens(user_id, created_at DESC);

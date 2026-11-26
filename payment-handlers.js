@@ -40,6 +40,11 @@ function normalizeExpiryMmYy(raw) {
   return digits;
 }
 export function mountPayments(app,pool,ready,opts={}){
+  const notifyPaid = async (db, orderId) => {
+    if (typeof opts.onOrderPaid === 'function') {
+      await opts.onOrderPaid(db, orderId).catch(() => {});
+    }
+  };
   app.post('/api/payments/payme',async(req,res)=>{
     const id=req.body?.id??null,method=req.body?.method,params=req.body?.params||{};
     const response=(result,issue)=>res.json({id,...(issue?{error:issue}:{result})});
@@ -89,6 +94,7 @@ export function mountPayments(app,pool,ready,opts={}){
             if(o.status!=='awaiting_payment') rpcFail(-31008,'Buyurtma holati to‘lovga mos emas.');
             t=(await db.query('UPDATE payment_transactions SET state=2,perform_time=$2 WHERE id=$1 RETURNING *',[t.id,Date.now()])).rows[0];
             await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1",[t.order_id]);
+            await notifyPaid(db, t.order_id);
           } else if(t.state!==2) rpcFail(-31008,'Tranzaksiya holati xato.');
           result={transaction:String(t.id),perform_time:Number(t.perform_time),state:t.state};
         } else if(method==='CancelTransaction'){
@@ -140,6 +146,7 @@ export function mountPayments(app,pool,ready,opts={}){
       if(t.state!==1||o.status!=='awaiting_payment') return await done(-9,'Transaction cancelled');
       await db.query('UPDATE payment_transactions SET state=2,perform_time=$2 WHERE id=$1',[t.id,Date.now()]);
       await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1",[o.id]);
+      await notifyPaid(db, o.id);
       return await done(0,'Success',{merchant_confirm_id:t.id});
     }catch(e){try{await db.query('ROLLBACK');}catch{}console.error('Click callback:',e.message);return out(-8,'Error in request from click');}finally{db.release();}
   });
@@ -177,6 +184,7 @@ export function mountPayments(app,pool,ready,opts={}){
         if (decision === 'pay') {
           const tx = (await db.query("INSERT INTO payment_transactions(gateway,gateway_id,order_id,amount,state,create_time,perform_time) VALUES('click',$1,$2,$3,2,$4,$4) RETURNING id", ['sandbox-' + Date.now(), o.id, o.total, Date.now()])).rows[0];
           await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1", [o.id]);
+          await notifyPaid(db, o.id);
           resultStatus = 'new';
           resultPayStatus = 'paid';
           void tx;
@@ -206,6 +214,7 @@ export function mountPayments(app,pool,ready,opts={}){
     // Step 1: Validate card + expiry on dedicated /pay/:id page & request Click SMS OTP (PAN is NEVER saved to DB)
     app.post('/api/payments/click/card-request', requireDb, auth, route(async (req, res) => {
       const orderId = String(req.body?.orderId || '');
+      const saveCard = req.body?.saveCard === true;
       if (!idOk(orderId)) throw fail(404, 'Buyurtma topilmadi.');
       const cardDigits = String(req.body?.cardNumber || '').replace(/\D/g, '');
       const expireMmYy = normalizeExpiryMmYy(req.body?.expireDate);
@@ -218,25 +227,26 @@ export function mountPayments(app,pool,ready,opts={}){
 
       const key = `${o.id}:${req.user.id}`;
       const maskedCard = `${cardDigits.slice(0, 4)} •••• •••• ${cardDigits.slice(-4)}`;
+      const cardType = cardDigits.startsWith('9860') ? 'HUMO' : 'UZCARD';
 
       if (clickCardApiReady()) {
         const resp = await fetch('https://api.click.uz/v2/merchant/card_token/request', {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json', Auth: clickAuthHeader() },
-          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_number: cardDigits, expire_date: expireMmYy, temporary: 1 }),
+          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_number: cardDigits, expire_date: expireMmYy, temporary: saveCard ? 0 : 1 }),
           signal: AbortSignal.timeout(15_000)
         });
         const data = await resp.json().catch(() => null);
         if (!resp.ok || Number(data?.error_code) !== 0 || !data?.card_token) {
           throw fail(400, String(data?.error_note || 'Click karta tekshiruvidan o‘tmadi. Ma’lumotlarni tekshiring.'));
         }
-        pendingCardTokens.set(key, { cardToken: String(data.card_token), mode: 'click', maskedCard, expiresAt: Date.now() + 10 * 60_000 });
+        pendingCardTokens.set(key, { cardToken: String(data.card_token), mode: 'click', maskedCard, cardType, saveCard, expiresAt: Date.now() + 10 * 60_000 });
         return res.json({ ok: true, step: 'verify', maskedCard, phoneNumber: String(data.phone_number || ''), message: 'Kartaga bog‘langan raqamga SMS kod yuborildi.' });
       }
 
       if (isClickSandboxAllowed()) {
         const sandboxOtp = String(randomInt(100_000, 1_000_000));
-        pendingCardTokens.set(key, { cardToken: 'sbx-' + randomUUID(), mode: 'sandbox', sandboxOtp, maskedCard, expiresAt: Date.now() + 10 * 60_000 });
+        pendingCardTokens.set(key, { cardToken: 'sbx-' + randomUUID(), mode: 'sandbox', sandboxOtp, maskedCard, cardType, saveCard, expiresAt: Date.now() + 10 * 60_000 });
         return res.json({ ok: true, step: 'verify', maskedCard, sandboxSmsCode: sandboxOtp, message: 'Sinov bank SMS kodi yuborildi.' });
       }
 
@@ -262,6 +272,7 @@ export function mountPayments(app,pool,ready,opts={}){
       if (dbCheck.payment_method !== 'click' || dbCheck.status !== 'awaiting_payment') throw fail(409, 'Bu buyurtma allaqachon yakunlangan.');
 
       let gatewayTxId;
+      let verifiedToken = pending.cardToken;
       if (pending.mode === 'click') {
         const verifyRes = await fetch('https://api.click.uz/v2/merchant/card_token/verify', {
           method: 'POST',
@@ -273,17 +284,18 @@ export function mountPayments(app,pool,ready,opts={}){
         if (!verifyRes.ok || Number(verifyData?.error_code) !== 0) {
           throw fail(400, String(verifyData?.error_note || 'SMS tasdiqlash kodi noto‘g‘ri.'));
         }
+        if (verifyData.card_token) verifiedToken = String(verifyData.card_token);
         const payRes = await fetch('https://api.click.uz/v2/merchant/card_token/payment', {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json', Auth: clickAuthHeader() },
-          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_token: pending.cardToken, amount: dbCheck.total, transaction_param: dbCheck.id }),
+          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_token: verifiedToken, amount: dbCheck.total, transaction_param: dbCheck.id }),
           signal: AbortSignal.timeout(15_000)
         });
         const payData = await payRes.json().catch(() => null);
         if (!payRes.ok || Number(payData?.error_code) !== 0) {
           throw fail(400, String(payData?.error_note || 'Kartadan mablag‘ yechishda xatolik yuz berdi.'));
         }
-        gatewayTxId = String(payData.payment_id || verifyData.card_token || ('click-' + Date.now()));
+        gatewayTxId = String(payData.payment_id || verifiedToken || ('click-' + Date.now()));
       } else {
         if (smsCode !== pending.sandboxOtp) throw fail(400, 'Sinov SMS kodi noto‘g‘ri.');
         gatewayTxId = 'sandbox-card-' + Date.now();
@@ -299,9 +311,86 @@ export function mountPayments(app,pool,ready,opts={}){
           [gatewayTxId, o.id, o.total, Date.now()]
         );
         await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1", [o.id]);
+        if (pending.saveCard && verifiedToken) {
+          await db.query(
+            `INSERT INTO card_tokens(user_id, provider, card_token, card_mask, card_type)
+             VALUES($1,'click',$2,$3,$4) ON CONFLICT(user_id, provider, card_token) DO NOTHING`,
+            [req.user.id, verifiedToken, pending.maskedCard, pending.cardType || 'UZCARD']
+          );
+        }
+        await notifyPaid(db, o.id);
         await db.query('COMMIT');
         pendingCardTokens.delete(key);
-        res.json({ ok: true, id: o.id, status: 'new', paymentStatus: 'paid', redirect: '/pay/' + o.id, message: 'To‘lov tasdiqlandi va belgilangan summa yechildi!' });
+        res.json({ ok: true, id: o.id, status: 'new', paymentStatus: 'paid', savedCard: !!pending.saveCard, redirect: '/pay/' + o.id, message: 'To‘lov tasdiqlandi va belgilangan summa yechildi!' });
+      } catch (e) {
+        await db.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        db.release();
+      }
+    }));
+
+    // Saved tokenized cards (ONLY Click token + last4 mask, NEVER raw PAN/expiry)
+    app.get('/api/payments/click/cards', requireDb, auth, route(async (req, res) => {
+      const { rows } = await pool.query(
+        'SELECT id, provider, card_mask, card_type, is_default, created_at FROM card_tokens WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10',
+        [req.user.id]
+      );
+      res.json({ cards: rows });
+    }));
+
+    app.delete('/api/payments/click/cards/:id', requireDb, auth, route(async (req, res) => {
+      if (!/^\d+$/.test(String(req.params.id || ''))) throw fail(404, 'Karta topilmadi.');
+      await pool.query('DELETE FROM card_tokens WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+      res.json({ ok: true });
+    }));
+
+    app.post('/api/payments/click/pay-saved', requireDb, auth, route(async (req, res) => {
+      const orderId = String(req.body?.orderId || '');
+      const cardId = String(req.body?.cardId || '');
+      if (!idOk(orderId) || !/^\d+$/.test(cardId)) throw fail(400, 'Buyurtma yoki karta ID noto‘g‘ri.');
+      const { rows: [card] } = await pool.query(
+        "SELECT id, card_token, card_mask FROM card_tokens WHERE id=$1 AND user_id=$2 AND provider='click'",
+        [cardId, req.user.id]
+      );
+      if (!card) throw fail(404, 'Saqlangan karta topilmadi.');
+
+      const dbCheck = (await pool.query('SELECT id, buyer_id, total, status, payment_method FROM orders WHERE id=$1', [orderId])).rows[0];
+      if (!dbCheck || String(dbCheck.buyer_id) !== String(req.user.id)) throw fail(404, 'Buyurtma topilmadi.');
+      if (dbCheck.payment_method !== 'click' || dbCheck.status !== 'awaiting_payment') throw fail(409, 'Bu buyurtma uchun to‘lov kutilmayapti.');
+
+      let gatewayTxId;
+      if (clickCardApiReady() && !String(card.card_token).startsWith('sbx-')) {
+        const payRes = await fetch('https://api.click.uz/v2/merchant/card_token/payment', {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', Auth: clickAuthHeader() },
+          body: JSON.stringify({ service_id: Number(process.env.CLICK_SERVICE_ID), card_token: card.card_token, amount: dbCheck.total, transaction_param: dbCheck.id }),
+          signal: AbortSignal.timeout(15_000)
+        });
+        const payData = await payRes.json().catch(() => null);
+        if (!payRes.ok || Number(payData?.error_code) !== 0) {
+          throw fail(400, String(payData?.error_note || 'Saqlangan kartadan mablag‘ yechib bo‘lmadi.'));
+        }
+        gatewayTxId = String(payData.payment_id || ('click-saved-' + Date.now()));
+      } else if (isClickSandboxAllowed() && String(card.card_token).startsWith('sbx-')) {
+        gatewayTxId = 'sandbox-saved-' + Date.now();
+      } else {
+        throw fail(503, 'Saqlangan karta orqali to‘lov faqat ulangan Click hisobida ishlaydi.');
+      }
+
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        const o = (await db.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [orderId])).rows[0];
+        if (!o || o.status !== 'awaiting_payment') throw fail(409, 'Buyurtma holati o‘zgargan.');
+        await db.query(
+          "INSERT INTO payment_transactions(gateway,gateway_id,order_id,amount,state,create_time,perform_time) VALUES('click',$1,$2,$3,2,$4,$4)",
+          [gatewayTxId, o.id, o.total, Date.now()]
+        );
+        await db.query("UPDATE orders SET status='new',payment_status='paid',updated_at=now() WHERE id=$1", [o.id]);
+        await notifyPaid(db, o.id);
+        await db.query('COMMIT');
+        res.json({ ok: true, id: o.id, status: 'new', paymentStatus: 'paid', redirect: '/pay/' + o.id, message: `${card.card_mask} orqali to‘lov yechildi!` });
       } catch (e) {
         await db.query('ROLLBACK').catch(() => {});
         throw e;

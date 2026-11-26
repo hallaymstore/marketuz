@@ -1,5 +1,5 @@
-const checkoutFields = new Set(['recipient','phone','region','district','address','note','paymentMethod','items','agree','checkoutKey','promoCode','deliveryMode','pickupBranchId']);
-const itemFields = new Set(['id','variantId','qty']);
+const checkoutFields = new Set(['recipient','phone','region','district','address','note','paymentMethod','items','agree','checkoutKey','promoCode','deliveryMode','pickupBranchId','useBonus']);
+const itemFields = new Set(['id','variantId','qty','selected']);
 
 export function hasCardNumber(value) {
   if (typeof value !== 'string') return false;

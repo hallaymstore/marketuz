@@ -60,7 +60,7 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
   // Persistent buyer cart
   app.get('/api/cart', requireDb, auth, route(async (req, res) => {
     const { rows } = await pool.query(
-      'SELECT product_id AS id, variant_id AS "variantId", qty FROM cart_items WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 30',
+      'SELECT product_id AS id, variant_id AS "variantId", qty, coalesce(selected, true) AS selected FROM cart_items WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 30',
       [req.user.id]
     );
     res.json({ items: rows });
@@ -69,7 +69,7 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
   app.put('/api/cart', requireDb, auth, route(async (req, res) => {
     const raw = Array.isArray(req.body?.items) ? req.body.items.slice(0, 30) : [];
     const items = raw
-      .map(x => ({ id: Number(x?.id), variantId: x?.variantId ? Number(x.variantId) : null, qty: Number(x?.qty || 1) }))
+      .map(x => ({ id: Number(x?.id), variantId: x?.variantId ? Number(x.variantId) : null, qty: Number(x?.qty || 1), selected: x?.selected !== false }))
       .filter(x => Number.isSafeInteger(x.id) && x.id > 0 && Number.isSafeInteger(x.qty) && x.qty >= 1 && x.qty <= 20 && (x.variantId === null || (Number.isSafeInteger(x.variantId) && x.variantId > 0)));
     const db = await pool.connect();
     try {
@@ -81,8 +81,8 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
         if (seen.has(key)) continue;
         seen.add(key);
         await db.query(
-          "INSERT INTO cart_items(user_id, product_id, variant_id, qty) SELECT $1, id, $3, $4 FROM products WHERE id=$2 AND status='active'",
-          [req.user.id, item.id, item.variantId, item.qty]
+          "INSERT INTO cart_items(user_id, product_id, variant_id, qty, selected, reminded_at) SELECT $1, id, $3, $4, $5, NULL FROM products WHERE id=$2 AND status='active'",
+          [req.user.id, item.id, item.variantId, item.qty, item.selected]
         );
       }
       await db.query('COMMIT');
@@ -95,15 +95,15 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
     res.json({ ok: true });
   }));
 
-  // Product reviews & verified buyer ratings
+  // Product reviews & verified buyer ratings (with photo attachments & helpful votes)
   app.get('/api/products/:id/reviews', requireDb, route(async (req, res) => {
     const pid = idParam(req.params.id);
     const { rows } = await pool.query(
-      `SELECT r.id, r.rating, r.comment, r.verified_purchase, r.created_at, u.full_name AS author_name
+      `SELECT r.id, r.rating, r.comment, r.verified_purchase, r.photos, r.helpful_count, r.created_at, u.full_name AS author_name
        FROM product_reviews r
        JOIN users u ON u.id = r.user_id
        WHERE r.product_id=$1 AND u.deleted_at IS NULL
-       ORDER BY r.verified_purchase DESC, r.created_at DESC
+       ORDER BY r.helpful_count DESC, r.verified_purchase DESC, r.created_at DESC
        LIMIT 50`,
       [pid]
     );
@@ -114,6 +114,10 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
     const pid = idParam(req.params.id);
     const rating = Number(req.body?.rating);
     const comment = text(req.body?.comment, 1000);
+    const rawPhotos = Array.isArray(req.body?.photos) ? req.body.photos.slice(0, 4) : [];
+    const photos = rawPhotos
+      .map(x => text(x, 1000))
+      .filter(u => /^\/media\/[0-9a-f-]{36}$/i.test(u) || /^https:\/\/\S{6,}$/i.test(u));
     if (!Number.isSafeInteger(rating) || rating < 1 || rating > 5) throw fail(400, 'Reyting 1 dan 5 gacha bo‘lsin.');
     if (comment.length < 3) throw fail(400, 'Sharh matni kamida 3 belgidan iborat bo‘lsin.');
 
@@ -135,12 +139,12 @@ export function mountMarketplaceFeatures(app, { pool, requireDb, auth, role, rou
     try {
       await db.query('BEGIN');
       const { rows } = await db.query(
-        `INSERT INTO product_reviews(product_id, user_id, order_id, rating, comment, verified_purchase)
-         VALUES($1,$2,$3,$4,$5,$6)
+        `INSERT INTO product_reviews(product_id, user_id, order_id, rating, comment, verified_purchase, photos)
+         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
          ON CONFLICT(product_id, user_id) DO UPDATE
-           SET rating=excluded.rating, comment=excluded.comment, verified_purchase=GREATEST(product_reviews.verified_purchase, excluded.verified_purchase)
+           SET rating=excluded.rating, comment=excluded.comment, photos=excluded.photos, verified_purchase=GREATEST(product_reviews.verified_purchase, excluded.verified_purchase)
          RETURNING *`,
-        [pid, req.user.id, orderId, rating, comment, verified]
+        [pid, req.user.id, orderId, rating, comment, verified, JSON.stringify(photos)]
       );
       review = rows[0];
       await db.query(
